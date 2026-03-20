@@ -53,7 +53,13 @@ pub struct OperationRequest {
 pub struct PackageRecord {
     pub name: String,
     pub spec: String,
+    #[serde(default = "default_package_source")]
+    pub source: String,
     pub installed_at: String,
+}
+
+fn default_package_source() -> String {
+    "conda".to_string()
 }
 
 #[derive(Debug, Clone, Serialize)]

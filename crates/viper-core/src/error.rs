@@ -8,6 +8,8 @@ pub enum CoreError {
     HomeUnavailable,
     #[error("target prefix is required: pass --prefix or --name")]
     MissingTargetPrefix,
+    #[error("cannot set both --prefix and --name")]
+    ConflictingTargetOptions,
     #[error("prefix '{0}' does not exist")]
     PrefixNotFound(String),
     #[error("prefix '{0}' is not a managed environment")]
@@ -18,6 +20,12 @@ pub enum CoreError {
     UnsupportedEnvironmentFile,
     #[error("invalid environment file: {0}")]
     InvalidEnvironmentFile(String),
+    #[error("network error: {0}")]
+    Network(String),
+    #[error("invalid repodata: {0}")]
+    InvalidRepodata(String),
+    #[error("offline mode requires a cached repodata index (not implemented yet)")]
+    OfflineRepodataUnavailable,
     #[error("config key '{0}' is not supported")]
     UnsupportedConfigKey(String),
     #[error("io error: {0}")]

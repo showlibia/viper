@@ -98,6 +98,10 @@ fn parse_bool(value: &str) -> Result<bool, CoreError> {
 }
 
 pub fn build_config(input: ConfigInput, store: &ConfigStore) -> Result<Config, CoreError> {
+    if input.globals.prefix.is_some() && input.globals.name.is_some() {
+        return Err(CoreError::ConflictingTargetOptions);
+    }
+
     let env_root = std::env::var_os("VIPER_ROOT_PREFIX").map(PathBuf::from);
     let env_channels = std::env::var("VIPER_CHANNELS").ok().map(|raw| {
         raw.split(',')

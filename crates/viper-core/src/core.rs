@@ -4,49 +4,103 @@ use serde_json::json;
 
 use crate::config::{ConfigInput, ConfigStore, build_config};
 use crate::error::CoreError;
+use crate::repodata::fetch_packages;
+use crate::solver::solve_to_actions;
 use crate::spec::parse_env_file;
 use crate::state::{EnvironmentState, ensure_prefix_layout, is_managed_prefix};
 use crate::types::{CliConfigCommand, CliOperation, OperationRequest, OperationResult};
 
 pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> {
+    let globals = request.globals.clone();
+    let op = request.op;
     let store = ConfigStore::from_home()?;
     let config = build_config(
         ConfigInput {
-            globals: request.globals,
+            globals: globals.clone(),
         },
         &store,
     )?;
 
-    match request.op {
+    match op {
         CliOperation::Create { specs, file } => {
-            let target_prefix = config
-                .target_prefix
-                .clone()
-                .ok_or(CoreError::MissingTargetPrefix)?;
             let mut all_specs = specs;
+            let mut pip_specs = Vec::new();
+            let mut file_name = None;
+            let mut file_channels = Vec::new();
             if let Some(path) = file {
                 let file_specs = parse_env_file(&path)?;
-                all_specs.extend(file_specs);
+                all_specs.extend(file_specs.conda_specs);
+                pip_specs.extend(file_specs.pip_specs);
+                file_name = file_specs.name;
+                file_channels = file_specs.channels;
             }
+
+            let target_prefix = globals
+                .prefix
+                .clone()
+                .or_else(|| {
+                    globals
+                        .name
+                        .as_ref()
+                        .map(|name| config.root_prefix.join("envs").join(name))
+                })
+                .or_else(|| {
+                    file_name
+                        .as_ref()
+                        .map(|name| config.root_prefix.join("envs").join(name))
+                })
+                .or_else(|| std::env::var_os("CONDA_PREFIX").map(std::path::PathBuf::from))
+                .ok_or(CoreError::MissingTargetPrefix)?;
+            let channels = effective_channels(&config.channels, &globals.channels, &file_channels);
+            let mut warnings = Vec::new();
+            let repodata =
+                match fetch_packages(&channels, &current_platform_subdir(), config.offline) {
+                    Ok(pkgs) => pkgs,
+                    Err(err) => {
+                        warnings.push(err.to_string());
+                        Vec::new()
+                    }
+                };
+            let mut link_actions = solve_to_actions(&all_specs, &repodata);
+            link_actions.extend(
+                pip_specs
+                    .iter()
+                    .map(|spec| crate::transaction::PlannedLink {
+                        name: crate::spec::package_name_from_spec(spec)
+                            .unwrap_or_else(|_| spec.clone()),
+                        version: "unknown".to_string(),
+                        build: "pip".to_string(),
+                        channel: "pypi".to_string(),
+                        url: String::new(),
+                        source: "pip".to_string(),
+                    }),
+            );
 
             let mut state = EnvironmentState::empty();
             state.install_specs(&all_specs)?;
+            state.install_pip_specs(&pip_specs)?;
 
             if !config.dry_run {
                 ensure_prefix_layout(&target_prefix)?;
                 state.save(&target_prefix)?;
             }
 
-            Ok(OperationResult::ok(
+            let mut result = OperationResult::ok(
                 "environment created",
                 json!({
                     "root_prefix": config.root_prefix,
                     "target_prefix": target_prefix,
-                    "channels": config.channels,
+                    "channels": channels,
                     "specs": all_specs,
+                    "pip_specs": pip_specs,
+                    "actions": {
+                        "link": link_actions,
+                    },
                     "dry_run": config.dry_run,
                 }),
-            ))
+            );
+            result.warnings = warnings;
+            Ok(result)
         }
         CliOperation::Install { specs, file } => {
             let target_prefix = config
@@ -65,26 +119,62 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             }
 
             let mut all_specs = specs;
+            let mut pip_specs = Vec::new();
+            let mut file_channels = Vec::new();
             if let Some(path) = file {
-                all_specs.extend(parse_env_file(&path)?);
+                let parsed = parse_env_file(&path)?;
+                all_specs.extend(parsed.conda_specs);
+                pip_specs.extend(parsed.pip_specs);
+                file_channels = parsed.channels;
             }
+            let channels = effective_channels(&config.channels, &globals.channels, &file_channels);
+            let mut warnings = Vec::new();
+            let repodata =
+                match fetch_packages(&channels, &current_platform_subdir(), config.offline) {
+                    Ok(pkgs) => pkgs,
+                    Err(err) => {
+                        warnings.push(err.to_string());
+                        Vec::new()
+                    }
+                };
+            let mut link_actions = solve_to_actions(&all_specs, &repodata);
+            link_actions.extend(
+                pip_specs
+                    .iter()
+                    .map(|spec| crate::transaction::PlannedLink {
+                        name: crate::spec::package_name_from_spec(spec)
+                            .unwrap_or_else(|_| spec.clone()),
+                        version: "unknown".to_string(),
+                        build: "pip".to_string(),
+                        channel: "pypi".to_string(),
+                        url: String::new(),
+                        source: "pip".to_string(),
+                    }),
+            );
 
             let mut state = EnvironmentState::load(&target_prefix)?;
             let changed = state.install_specs(&all_specs)?;
+            let pip_changed = state.install_pip_specs(&pip_specs)?;
 
             if !config.dry_run {
                 state.save(&target_prefix)?;
             }
 
-            Ok(OperationResult::ok(
+            let mut result = OperationResult::ok(
                 "packages installed",
                 json!({
                     "target_prefix": target_prefix,
-                    "changed": changed,
+                    "changed": changed + pip_changed,
                     "specs": all_specs,
+                    "pip_specs": pip_specs,
+                    "actions": {
+                        "link": link_actions,
+                    },
                     "dry_run": config.dry_run,
                 }),
-            ))
+            );
+            result.warnings = warnings;
+            Ok(result)
         }
         CliOperation::Remove { specs, all } => {
             let target_prefix = config
@@ -220,5 +310,42 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 ))
             }
         },
+    }
+}
+
+fn effective_channels(
+    base_channels: &[String],
+    cli_channels: &[String],
+    yaml_channels: &[String],
+) -> Vec<String> {
+    if !cli_channels.is_empty() {
+        return dedup_channels(cli_channels.iter().chain(yaml_channels.iter()));
+    }
+    if !yaml_channels.is_empty() {
+        return dedup_channels(yaml_channels.iter());
+    }
+    base_channels.to_vec()
+}
+
+fn dedup_channels<'a>(channels: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for channel in channels {
+        if !out.iter().any(|c| c == channel) {
+            out.push(channel.clone());
+        }
+    }
+    out
+}
+
+fn current_platform_subdir() -> String {
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    match (os, arch) {
+        ("linux", "x86_64") => "linux-64".to_string(),
+        ("linux", "aarch64") => "linux-aarch64".to_string(),
+        ("macos", "x86_64") => "osx-64".to_string(),
+        ("macos", "aarch64") => "osx-arm64".to_string(),
+        ("windows", "x86_64") => "win-64".to_string(),
+        _ => format!("{os}-{arch}"),
     }
 }

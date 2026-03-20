@@ -43,6 +43,18 @@ impl EnvironmentState {
     }
 
     pub fn install_specs(&mut self, specs: &[String]) -> Result<usize, CoreError> {
+        self.install_specs_with_source(specs, "conda")
+    }
+
+    pub fn install_pip_specs(&mut self, specs: &[String]) -> Result<usize, CoreError> {
+        self.install_specs_with_source(specs, "pip")
+    }
+
+    fn install_specs_with_source(
+        &mut self,
+        specs: &[String],
+        source: &str,
+    ) -> Result<usize, CoreError> {
         let mut changed = 0usize;
         for spec in specs {
             let name = package_name_from_spec(spec)?;
@@ -50,11 +62,13 @@ impl EnvironmentState {
 
             if let Some(existing) = self.packages.iter_mut().find(|p| p.name == name) {
                 existing.spec = spec.clone();
+                existing.source = source.to_string();
                 existing.installed_at = now;
             } else {
                 self.packages.push(PackageRecord {
                     name,
                     spec: spec.clone(),
+                    source: source.to_string(),
                     installed_at: now,
                 });
                 changed += 1;

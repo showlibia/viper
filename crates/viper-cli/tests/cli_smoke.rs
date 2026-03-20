@@ -1,6 +1,7 @@
 use std::fs;
 
 use assert_cmd::Command;
+use predicates::str::contains;
 use serde_json::Value;
 use tempfile::tempdir;
 
@@ -127,4 +128,170 @@ fn config_set_get_and_info() {
     let info_json: Value = serde_json::from_slice(&output).expect("valid json");
     assert_eq!(info_json["success"], true);
     assert!(info_json["data"]["platform"].is_string());
+}
+
+#[test]
+fn create_from_env_file_uses_yaml_name_channels_and_pip_specs() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+name: from-yaml
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python>=3.11
+  - pip
+  - pip:
+      - numpy==2.0.0
+"#,
+    )
+    .expect("write env file");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+
+    let expected_prefix = tmp_home
+        .path()
+        .join(".viper")
+        .join("envs")
+        .join("from-yaml");
+    assert_eq!(
+        body["data"]["target_prefix"],
+        expected_prefix.display().to_string()
+    );
+    assert_eq!(
+        body["data"]["channels"],
+        serde_json::json!(["conda-forge", "bioconda"])
+    );
+
+    let state_file = expected_prefix.join("conda-meta").join("viper-state.json");
+    let raw = fs::read_to_string(state_file).expect("state file exists");
+    let state: Value = serde_json::from_str(&raw).expect("valid state json");
+    let packages = state["packages"].as_array().expect("packages array");
+    assert!(
+        packages
+            .iter()
+            .any(|p| p["name"] == "python" && p["source"] == "conda")
+    );
+    assert!(
+        packages
+            .iter()
+            .any(|p| p["name"] == "numpy" && p["source"] == "pip")
+    );
+}
+
+#[test]
+fn create_rejects_prefix_and_name_together() {
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("env");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .args([
+            "--no-rc",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-n",
+            "dev",
+            "python",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("cannot set both --prefix and --name"));
+}
+
+#[test]
+fn create_from_env_file_prefers_yaml_name_over_conda_prefix() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let active_prefix = tmp.path().join("active");
+    fs::create_dir_all(active_prefix.join("conda-meta")).expect("create active prefix");
+
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+name: from-yaml-priority
+dependencies:
+  - python
+"#,
+    )
+    .expect("write env file");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .env("CONDA_PREFIX", &active_prefix)
+        .args([
+            "--no-rc",
+            "create",
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+
+    let expected_prefix = tmp_home
+        .path()
+        .join(".viper")
+        .join("envs")
+        .join("from-yaml-priority");
+    assert_eq!(
+        body["data"]["target_prefix"],
+        expected_prefix.display().to_string()
+    );
+    assert_ne!(
+        body["data"]["target_prefix"],
+        active_prefix.display().to_string()
+    );
+}
+
+#[test]
+fn create_dry_run_returns_transaction_actions() {
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("env");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .args([
+            "--no-rc",
+            "create",
+            "--dry-run",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python>=3.11",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+
+    assert!(body["data"]["actions"]["link"].is_array());
 }
