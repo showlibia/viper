@@ -295,3 +295,89 @@ fn create_dry_run_returns_transaction_actions() {
 
     assert!(body["data"]["actions"]["link"].is_array());
 }
+
+#[test]
+fn offline_without_cache_fails() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python>=3.11",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(contains("offline mode requires a cached repodata index"));
+}
+
+#[test]
+fn offline_with_cache_works() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let cache_root = tmp_home.path().join(".viper").join("pkgs").join("cache");
+    fs::create_dir_all(&cache_root).expect("create cache root");
+
+    let channel = "https://conda.anaconda.org/conda-forge";
+    let subdir = "linux-64";
+    let key = cache_name_from_repodata_url(&format!("{channel}/{subdir}/current_repodata.json"));
+    fs::write(
+        cache_root.join(format!("{key}.json")),
+        r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+    )
+    .expect("write repodata cache");
+    fs::write(
+        cache_root.join(format!("{key}.state.json")),
+        format!(
+            "{{\"fetched_at_epoch_s\":{},\"cache_control\":\"max-age=3600\"}}",
+            4_102_444_800u64
+        ),
+    )
+    .expect("write repodata state");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "--dry-run",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python>=3.11",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let links = body["data"]["actions"]["link"]
+        .as_array()
+        .expect("link actions");
+    assert!(links.iter().any(|p| p["name"] == "python"));
+}
+
+fn cache_name_from_repodata_url(url: &str) -> String {
+    let mut normalized = url.trim_end_matches('/').to_string();
+    for suffix in ["/repodata.json", "/current_repodata.json"] {
+        if normalized.ends_with(suffix) {
+            normalized.truncate(normalized.len().saturating_sub(suffix.len()));
+            break;
+        }
+    }
+    let digest = md5::compute(normalized.as_bytes());
+    format!("{digest:x}")[..8].to_string()
+}

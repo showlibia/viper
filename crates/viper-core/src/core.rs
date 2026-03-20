@@ -53,14 +53,22 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 .ok_or(CoreError::MissingTargetPrefix)?;
             let channels = effective_channels(&config.channels, &globals.channels, &file_channels);
             let mut warnings = Vec::new();
-            let repodata =
-                match fetch_packages(&channels, &current_platform_subdir(), config.offline) {
-                    Ok(pkgs) => pkgs,
-                    Err(err) => {
-                        warnings.push(err.to_string());
-                        Vec::new()
+            let repodata = match fetch_packages(
+                &channels,
+                &current_platform_subdir(),
+                config.offline,
+                &config.root_prefix.join("pkgs").join("cache"),
+                config.local_repodata_ttl,
+            ) {
+                Ok(pkgs) => pkgs,
+                Err(err) => {
+                    if config.offline {
+                        return Err(err);
                     }
-                };
+                    warnings.push(err.to_string());
+                    Vec::new()
+                }
+            };
             let mut link_actions = solve_to_actions(&all_specs, &repodata);
             link_actions.extend(
                 pip_specs
@@ -129,14 +137,22 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             }
             let channels = effective_channels(&config.channels, &globals.channels, &file_channels);
             let mut warnings = Vec::new();
-            let repodata =
-                match fetch_packages(&channels, &current_platform_subdir(), config.offline) {
-                    Ok(pkgs) => pkgs,
-                    Err(err) => {
-                        warnings.push(err.to_string());
-                        Vec::new()
+            let repodata = match fetch_packages(
+                &channels,
+                &current_platform_subdir(),
+                config.offline,
+                &config.root_prefix.join("pkgs").join("cache"),
+                config.local_repodata_ttl,
+            ) {
+                Ok(pkgs) => pkgs,
+                Err(err) => {
+                    if config.offline {
+                        return Err(err);
                     }
-                };
+                    warnings.push(err.to_string());
+                    Vec::new()
+                }
+            };
             let mut link_actions = solve_to_actions(&all_specs, &repodata);
             link_actions.extend(
                 pip_specs
@@ -261,6 +277,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "channels": config.channels,
                     "channel_priority": config.channel_priority,
                     "offline": config.offline,
+                    "local_repodata_ttl": config.local_repodata_ttl,
                     "json": config.json,
                     "env_exists": env_exists,
                     "platform": std::env::consts::OS,
@@ -277,6 +294,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "channel_priority": config.channel_priority,
                     "always_yes": config.always_yes,
                     "offline": config.offline,
+                    "local_repodata_ttl": config.local_repodata_ttl,
                     "rc_path": store.path(),
                 }),
             )),
@@ -287,6 +305,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "channel_priority" => json!(config.channel_priority),
                     "always_yes" => json!(config.always_yes),
                     "offline" => json!(config.offline),
+                    "local_repodata_ttl" => json!(config.local_repodata_ttl),
                     other => return Err(CoreError::UnsupportedConfigKey(other.to_string())),
                 };
 

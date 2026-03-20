@@ -16,5 +16,6 @@ viper-core = { path = "../viper-core" }
 
 [dev-dependencies]
 assert_cmd = "2.0"
+md5 = "0.7"
 predicates = "3.1"
 tempfile = "3.13"

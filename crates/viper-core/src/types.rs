@@ -14,6 +14,7 @@ pub struct CliGlobalOptions {
     pub dry_run: bool,
     pub no_rc: bool,
     pub offline: bool,
+    pub repodata_ttl: Option<usize>,
     pub verbose: u8,
 }
 

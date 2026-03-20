@@ -24,7 +24,7 @@ pub enum CoreError {
     Network(String),
     #[error("invalid repodata: {0}")]
     InvalidRepodata(String),
-    #[error("offline mode requires a cached repodata index (not implemented yet)")]
+    #[error("offline mode requires a cached repodata index")]
     OfflineRepodataUnavailable,
     #[error("config key '{0}' is not supported")]
     UnsupportedConfigKey(String),

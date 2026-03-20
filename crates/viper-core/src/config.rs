@@ -19,6 +19,7 @@ pub struct Config {
     pub channel_priority: String,
     pub always_yes: bool,
     pub offline: bool,
+    pub local_repodata_ttl: usize,
     pub dry_run: bool,
     pub json: bool,
     pub verbose: u8,
@@ -36,6 +37,7 @@ struct RcFile {
     channel_priority: Option<String>,
     always_yes: Option<bool>,
     offline: Option<bool>,
+    local_repodata_ttl: Option<usize>,
 }
 
 impl ConfigStore {
@@ -65,6 +67,7 @@ impl ConfigStore {
             "channel_priority" => rc.channel_priority = Some(value.to_string()),
             "always_yes" => rc.always_yes = Some(parse_bool(value)?),
             "offline" => rc.offline = Some(parse_bool(value)?),
+            "local_repodata_ttl" => rc.local_repodata_ttl = Some(parse_usize(value)?),
             "root_prefix" => rc.root_prefix = Some(PathBuf::from(value)),
             "channels" => {
                 let split = value
@@ -97,6 +100,12 @@ fn parse_bool(value: &str) -> Result<bool, CoreError> {
     }
 }
 
+fn parse_usize(value: &str) -> Result<usize, CoreError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| CoreError::InvalidEnvironmentFile(format!("'{value}' is not a valid integer")))
+}
+
 pub fn build_config(input: ConfigInput, store: &ConfigStore) -> Result<Config, CoreError> {
     if input.globals.prefix.is_some() && input.globals.name.is_some() {
         return Err(CoreError::ConflictingTargetOptions);
@@ -110,6 +119,10 @@ pub fn build_config(input: ConfigInput, store: &ConfigStore) -> Result<Config, C
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>()
     });
+    let env_repodata_ttl = std::env::var("VIPER_LOCAL_REPODATA_TTL")
+        .ok()
+        .map(|x| parse_usize(&x))
+        .transpose()?;
 
     let rc = if input.globals.no_rc {
         RcFile::default()
@@ -153,6 +166,12 @@ pub fn build_config(input: ConfigInput, store: &ConfigStore) -> Result<Config, C
             .unwrap_or_else(|| "flexible".to_string()),
         always_yes: input.globals.yes || rc.always_yes.unwrap_or(false),
         offline: input.globals.offline || rc.offline.unwrap_or(false),
+        local_repodata_ttl: input
+            .globals
+            .repodata_ttl
+            .or(env_repodata_ttl)
+            .or(rc.local_repodata_ttl)
+            .unwrap_or(1),
         dry_run: input.globals.dry_run,
         json: input.globals.json,
         verbose: input.globals.verbose,
@@ -190,6 +209,7 @@ mod tests {
             dry_run: false,
             no_rc: true,
             offline: false,
+            repodata_ttl: None,
             verbose: 0,
         };
         let cfg = build_config(

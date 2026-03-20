@@ -41,6 +41,9 @@ struct Cli {
     #[arg(long = "offline", global = true)]
     offline: bool,
 
+    #[arg(long = "repodata-ttl", global = true)]
+    repodata_ttl: Option<usize>,
+
     #[arg(short = 'v', action = ArgAction::Count, global = true)]
     verbose: u8,
 
@@ -109,6 +112,7 @@ fn run() -> Result<()> {
         dry_run: cli.dry_run,
         no_rc: cli.no_rc,
         offline: cli.offline,
+        repodata_ttl: cli.repodata_ttl,
         verbose: cli.verbose,
     };
 
