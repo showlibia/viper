@@ -5,7 +5,7 @@ use serde_json::json;
 use crate::config::{ConfigInput, ConfigStore, build_config};
 use crate::error::CoreError;
 use crate::repodata::fetch_packages;
-use crate::solver::solve_to_actions;
+use crate::solver::{solve_to_actions, spec_requires_full_repodata};
 use crate::spec::parse_env_file;
 use crate::state::{EnvironmentState, ensure_prefix_layout, is_managed_prefix};
 use crate::types::{CliConfigCommand, CliOperation, OperationRequest, OperationResult};
@@ -52,24 +52,25 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 .or_else(|| std::env::var_os("CONDA_PREFIX").map(std::path::PathBuf::from))
                 .ok_or(CoreError::MissingTargetPrefix)?;
             let channels = effective_channels(&config.channels, &globals.channels, &file_channels);
-            let mut warnings = Vec::new();
-            let repodata = match fetch_packages(
-                &channels,
-                &current_platform_subdir(),
-                config.offline,
-                &config.root_prefix.join("pkgs").join("cache"),
-                config.local_repodata_ttl,
-            ) {
-                Ok(pkgs) => pkgs,
-                Err(err) => {
-                    if config.offline {
-                        return Err(err);
-                    }
-                    warnings.push(err.to_string());
-                    Vec::new()
-                }
+            let repodata_filename = select_repodata_filename(&all_specs);
+            let repodata = if all_specs.is_empty() {
+                Vec::new()
+            } else {
+                fetch_packages(
+                    &channels,
+                    &current_platform_subdir(),
+                    config.offline,
+                    &config.root_prefix.join("pkgs").join("cache"),
+                    config.local_repodata_ttl,
+                    repodata_filename,
+                )?
             };
             let mut link_actions = solve_to_actions(&all_specs, &repodata);
+            if has_unresolved_conda_actions(&link_actions) {
+                return Err(CoreError::UnsatisfiedSpecs(unresolved_action_names(
+                    &link_actions,
+                )));
+            }
             link_actions.extend(
                 pip_specs
                     .iter()
@@ -93,7 +94,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 state.save(&target_prefix)?;
             }
 
-            let mut result = OperationResult::ok(
+            let result = OperationResult::ok(
                 "environment created",
                 json!({
                     "root_prefix": config.root_prefix,
@@ -107,7 +108,6 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "dry_run": config.dry_run,
                 }),
             );
-            result.warnings = warnings;
             Ok(result)
         }
         CliOperation::Install { specs, file } => {
@@ -136,24 +136,25 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 file_channels = parsed.channels;
             }
             let channels = effective_channels(&config.channels, &globals.channels, &file_channels);
-            let mut warnings = Vec::new();
-            let repodata = match fetch_packages(
-                &channels,
-                &current_platform_subdir(),
-                config.offline,
-                &config.root_prefix.join("pkgs").join("cache"),
-                config.local_repodata_ttl,
-            ) {
-                Ok(pkgs) => pkgs,
-                Err(err) => {
-                    if config.offline {
-                        return Err(err);
-                    }
-                    warnings.push(err.to_string());
-                    Vec::new()
-                }
+            let repodata_filename = select_repodata_filename(&all_specs);
+            let repodata = if all_specs.is_empty() {
+                Vec::new()
+            } else {
+                fetch_packages(
+                    &channels,
+                    &current_platform_subdir(),
+                    config.offline,
+                    &config.root_prefix.join("pkgs").join("cache"),
+                    config.local_repodata_ttl,
+                    repodata_filename,
+                )?
             };
             let mut link_actions = solve_to_actions(&all_specs, &repodata);
+            if has_unresolved_conda_actions(&link_actions) {
+                return Err(CoreError::UnsatisfiedSpecs(unresolved_action_names(
+                    &link_actions,
+                )));
+            }
             link_actions.extend(
                 pip_specs
                     .iter()
@@ -176,7 +177,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 state.save(&target_prefix)?;
             }
 
-            let mut result = OperationResult::ok(
+            let result = OperationResult::ok(
                 "packages installed",
                 json!({
                     "target_prefix": target_prefix,
@@ -189,7 +190,6 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "dry_run": config.dry_run,
                 }),
             );
-            result.warnings = warnings;
             Ok(result)
         }
         CliOperation::Remove { specs, all } => {
@@ -367,4 +367,31 @@ fn current_platform_subdir() -> String {
         ("windows", "x86_64") => "win-64".to_string(),
         _ => format!("{os}-{arch}"),
     }
+}
+
+fn select_repodata_filename(specs: &[String]) -> &'static str {
+    if specs.iter().any(|spec| spec_requires_full_repodata(spec)) {
+        "repodata.json"
+    } else {
+        "current_repodata.json"
+    }
+}
+
+fn has_unresolved_conda_actions(actions: &[crate::transaction::PlannedLink]) -> bool {
+    actions
+        .iter()
+        .any(|a| a.source == "conda" && a.channel == "unresolved")
+}
+
+fn unresolved_action_names(actions: &[crate::transaction::PlannedLink]) -> Vec<String> {
+    let mut names = Vec::new();
+    for action in actions
+        .iter()
+        .filter(|a| a.source == "conda" && a.channel == "unresolved")
+    {
+        if !names.iter().any(|n| n == &action.name) {
+            names.push(action.name.clone());
+        }
+    }
+    names
 }

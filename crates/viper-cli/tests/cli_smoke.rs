@@ -370,13 +370,34 @@ fn offline_with_cache_works() {
     assert!(links.iter().any(|p| p["name"] == "python"));
 }
 
+#[test]
+fn create_fails_without_repodata_and_does_not_write_state() {
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("env");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .args([
+            "--no-rc",
+            "create",
+            "-c",
+            "http://127.0.0.1:9/bad-channel",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python>=3.11",
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let state_file = prefix.join("conda-meta").join("viper-state.json");
+    assert!(!state_file.exists());
+}
+
 fn cache_name_from_repodata_url(url: &str) -> String {
     let mut normalized = url.trim_end_matches('/').to_string();
-    for suffix in ["/repodata.json", "/current_repodata.json"] {
-        if normalized.ends_with(suffix) {
-            normalized.truncate(normalized.len().saturating_sub(suffix.len()));
-            break;
-        }
+    if normalized.ends_with("/repodata.json") {
+        normalized.truncate(normalized.len().saturating_sub("/repodata.json".len()));
     }
     let digest = md5::compute(normalized.as_bytes());
     format!("{digest:x}")[..8].to_string()

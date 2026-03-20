@@ -50,6 +50,7 @@ pub fn fetch_packages(
     offline: bool,
     cache_root: &Path,
     local_repodata_ttl: usize,
+    repodata_filename: &str,
 ) -> Result<Vec<RepoPackage>, CoreError> {
     let client = if offline {
         None
@@ -75,6 +76,7 @@ pub fn fetch_packages(
                 offline,
                 cache_root,
                 local_repodata_ttl,
+                repodata_filename,
             ) {
                 Ok(entry) => entry,
                 Err(err) => {
@@ -99,8 +101,9 @@ fn fetch_subdir(
     offline: bool,
     cache_root: &Path,
     local_repodata_ttl: usize,
+    repodata_filename: &str,
 ) -> Result<RepodataFile, CoreError> {
-    let url = format!("{channel}/{subdir}/current_repodata.json");
+    let url = format!("{channel}/{subdir}/{repodata_filename}");
     let paths = cache_paths(cache_root, &url);
     let cached_json = read_cached_json(&paths.json);
     let cached_meta = read_cached_meta(&paths.meta);
@@ -282,11 +285,8 @@ fn cache_paths(cache_root: &Path, repodata_url: &str) -> CachePaths {
 
 fn cache_name_from_url(url: &str) -> String {
     let mut normalized = url.trim_end_matches('/').to_string();
-    for suffix in ["/repodata.json", "/current_repodata.json"] {
-        if normalized.ends_with(suffix) {
-            normalized.truncate(normalized.len().saturating_sub(suffix.len()));
-            break;
-        }
+    if normalized.ends_with("/repodata.json") {
+        normalized.truncate(normalized.len().saturating_sub("/repodata.json".len()));
     }
     let digest = md5::compute(normalized.as_bytes());
     format!("{digest:x}")[..8].to_string()
@@ -358,9 +358,30 @@ mod tests {
         )
         .expect("write meta");
 
-        let pkgs = fetch_packages(&[channel.to_string()], subdir, true, &cache_root, 1)
-            .expect("must load from cache");
+        let pkgs = fetch_packages(
+            &[channel.to_string()],
+            subdir,
+            true,
+            &cache_root,
+            1,
+            "current_repodata.json",
+        )
+        .expect("must load from cache");
         assert!(pkgs.iter().any(|p| p.name == "python"));
+    }
+
+    #[test]
+    fn full_and_current_repodata_use_distinct_cache_files() {
+        let cache_root = PathBuf::from("/tmp/cache");
+        let channel = "https://conda.anaconda.org/conda-forge";
+        let subdir = "linux-64";
+        let full = cache_paths(&cache_root, &format!("{channel}/{subdir}/repodata.json"));
+        let current = cache_paths(
+            &cache_root,
+            &format!("{channel}/{subdir}/current_repodata.json"),
+        );
+        assert_ne!(full.json, current.json);
+        assert_ne!(full.meta, current.meta);
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub enum CoreError {
     InvalidRepodata(String),
     #[error("offline mode requires a cached repodata index")]
     OfflineRepodataUnavailable,
+    #[error("unsatisfied package specifications: {0:?}")]
+    UnsatisfiedSpecs(Vec<String>),
     #[error("config key '{0}' is not supported")]
     UnsupportedConfigKey(String),
     #[error("io error: {0}")]
