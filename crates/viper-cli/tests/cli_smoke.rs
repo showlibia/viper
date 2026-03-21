@@ -345,6 +345,100 @@ dependencies:
 }
 
 #[test]
+fn create_from_env_file_prefers_cli_name_over_yaml_name() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+name: from-yaml
+dependencies:
+  - python
+"#,
+    )
+    .expect("write env file");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-n",
+            "from-cli",
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+
+    let expected_prefix = tmp_home.path().join(".viper").join("envs").join("from-cli");
+    assert_eq!(
+        body["data"]["target_prefix"],
+        expected_prefix.display().to_string()
+    );
+}
+
+#[test]
+fn create_from_env_file_prefers_cli_prefix_over_yaml_name() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let explicit_prefix = tmp.path().join("explicit-prefix");
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+name: from-yaml
+dependencies:
+  - python
+"#,
+    )
+    .expect("write env file");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            explicit_prefix.to_str().expect("utf8"),
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+
+    assert_eq!(
+        body["data"]["target_prefix"],
+        explicit_prefix.display().to_string()
+    );
+}
+
+#[test]
 fn create_from_env_file_rejects_name_with_path_separator() {
     let tmp = tempdir().expect("create temp dir");
     let spec_file = tmp.path().join("environment.yaml");

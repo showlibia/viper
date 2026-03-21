@@ -10,6 +10,14 @@ use crate::spec::parse_env_file;
 use crate::state::{EnvironmentState, ensure_prefix_layout, is_managed_prefix};
 use crate::types::{CliConfigCommand, CliOperation, OperationRequest, OperationResult};
 
+struct NormalizedRequestInputs {
+    conda_specs: Vec<String>,
+    pip_specs: Vec<String>,
+    yaml_name: Option<String>,
+    yaml_file_stem: Option<String>,
+    channels: Vec<String>,
+}
+
 pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> {
     let globals = request.globals.clone();
     let op = request.op;
@@ -23,53 +31,20 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
 
     match op {
         CliOperation::Create { specs, file } => {
-            let mut all_specs = specs;
-            let mut pip_specs = Vec::new();
-            let mut file_name = None;
-            let mut file_stem_name = None;
-            let mut file_channels = Vec::new();
-            if let Some(path) = file {
-                let file_specs = parse_env_file(&path)?;
-                all_specs.extend(file_specs.conda_specs);
-                pip_specs.extend(file_specs.pip_specs);
-                file_name = file_specs.name;
-                file_stem_name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(ToOwned::to_owned);
-                file_channels = file_specs.channels;
-            }
-
-            let target_prefix = globals
-                .prefix
-                .clone()
-                .or_else(|| {
-                    globals
-                        .name
-                        .as_ref()
-                        .map(|name| config.root_prefix.join("envs").join(name))
-                })
-                .or_else(|| {
-                    file_name
-                        .as_ref()
-                        .map(|name| config.root_prefix.join("envs").join(name))
-                })
-                .or_else(|| {
-                    file_stem_name
-                        .as_ref()
-                        .map(|name| config.root_prefix.join("envs").join(name))
-                })
-                .or_else(|| std::env::var_os("CONDA_PREFIX").map(std::path::PathBuf::from))
-                .ok_or(CoreError::MissingTargetPrefix)?;
-            let channels = effective_channels(&config.channels, &globals.channels, &file_channels);
-            let repodata_filename = select_repodata_filename(&all_specs);
-            let repodata = if all_specs.is_empty() {
+            let normalized =
+                normalize_request_inputs(specs, file, &config.channels, &globals.channels)?;
+            let target_prefix = resolve_create_target_prefix(
+                &globals,
+                &config.root_prefix,
+                normalized.yaml_name.as_deref(),
+                normalized.yaml_file_stem.as_deref(),
+            )?;
+            let repodata_filename = select_repodata_filename(&normalized.conda_specs);
+            let repodata = if normalized.conda_specs.is_empty() {
                 Vec::new()
             } else {
                 fetch_packages(
-                    &channels,
+                    &normalized.channels,
                     &current_platform_subdir(),
                     config.offline,
                     &config.root_prefix.join("pkgs").join("cache"),
@@ -77,29 +52,27 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     repodata_filename,
                 )?
             };
-            let mut link_actions = solve_to_actions(&all_specs, &repodata);
+            let mut link_actions = solve_to_actions(&normalized.conda_specs, &repodata);
             if has_unresolved_conda_actions(&link_actions) {
                 return Err(CoreError::UnsatisfiedSpecs(unresolved_action_names(
                     &link_actions,
                 )));
             }
-            link_actions.extend(
-                pip_specs
-                    .iter()
-                    .map(|spec| crate::transaction::PlannedLink {
-                        name: crate::spec::package_name_from_spec(spec)
-                            .unwrap_or_else(|_| spec.clone()),
-                        version: "unknown".to_string(),
-                        build: "pip".to_string(),
-                        channel: "pypi".to_string(),
-                        url: String::new(),
-                        source: "pip".to_string(),
-                    }),
-            );
+            link_actions.extend(normalized.pip_specs.iter().map(|spec| {
+                crate::transaction::PlannedLink {
+                    name: crate::spec::package_name_from_spec(spec)
+                        .unwrap_or_else(|_| spec.clone()),
+                    version: "unknown".to_string(),
+                    build: "pip".to_string(),
+                    channel: "pypi".to_string(),
+                    url: String::new(),
+                    source: "pip".to_string(),
+                }
+            }));
 
             let mut state = EnvironmentState::empty();
-            state.install_specs(&all_specs)?;
-            state.install_pip_specs(&pip_specs)?;
+            state.install_specs(&normalized.conda_specs)?;
+            state.install_pip_specs(&normalized.pip_specs)?;
 
             if !config.dry_run {
                 ensure_prefix_layout(&target_prefix)?;
@@ -111,9 +84,9 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 json!({
                     "root_prefix": config.root_prefix,
                     "target_prefix": target_prefix,
-                    "channels": channels,
-                    "specs": all_specs,
-                    "pip_specs": pip_specs,
+                    "channels": normalized.channels,
+                    "specs": normalized.conda_specs,
+                    "pip_specs": normalized.pip_specs,
                     "actions": {
                         "link": link_actions,
                     },
@@ -138,22 +111,14 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 ));
             }
 
-            let mut all_specs = specs;
-            let mut pip_specs = Vec::new();
-            let mut file_channels = Vec::new();
-            if let Some(path) = file {
-                let parsed = parse_env_file(&path)?;
-                all_specs.extend(parsed.conda_specs);
-                pip_specs.extend(parsed.pip_specs);
-                file_channels = parsed.channels;
-            }
-            let channels = effective_channels(&config.channels, &globals.channels, &file_channels);
-            let repodata_filename = select_repodata_filename(&all_specs);
-            let repodata = if all_specs.is_empty() {
+            let normalized =
+                normalize_request_inputs(specs, file, &config.channels, &globals.channels)?;
+            let repodata_filename = select_repodata_filename(&normalized.conda_specs);
+            let repodata = if normalized.conda_specs.is_empty() {
                 Vec::new()
             } else {
                 fetch_packages(
-                    &channels,
+                    &normalized.channels,
                     &current_platform_subdir(),
                     config.offline,
                     &config.root_prefix.join("pkgs").join("cache"),
@@ -161,29 +126,27 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     repodata_filename,
                 )?
             };
-            let mut link_actions = solve_to_actions(&all_specs, &repodata);
+            let mut link_actions = solve_to_actions(&normalized.conda_specs, &repodata);
             if has_unresolved_conda_actions(&link_actions) {
                 return Err(CoreError::UnsatisfiedSpecs(unresolved_action_names(
                     &link_actions,
                 )));
             }
-            link_actions.extend(
-                pip_specs
-                    .iter()
-                    .map(|spec| crate::transaction::PlannedLink {
-                        name: crate::spec::package_name_from_spec(spec)
-                            .unwrap_or_else(|_| spec.clone()),
-                        version: "unknown".to_string(),
-                        build: "pip".to_string(),
-                        channel: "pypi".to_string(),
-                        url: String::new(),
-                        source: "pip".to_string(),
-                    }),
-            );
+            link_actions.extend(normalized.pip_specs.iter().map(|spec| {
+                crate::transaction::PlannedLink {
+                    name: crate::spec::package_name_from_spec(spec)
+                        .unwrap_or_else(|_| spec.clone()),
+                    version: "unknown".to_string(),
+                    build: "pip".to_string(),
+                    channel: "pypi".to_string(),
+                    url: String::new(),
+                    source: "pip".to_string(),
+                }
+            }));
 
             let mut state = EnvironmentState::load(&target_prefix)?;
-            let changed = state.install_specs(&all_specs)?;
-            let pip_changed = state.install_pip_specs(&pip_specs)?;
+            let changed = state.install_specs(&normalized.conda_specs)?;
+            let pip_changed = state.install_pip_specs(&normalized.pip_specs)?;
 
             if !config.dry_run {
                 state.save(&target_prefix)?;
@@ -194,8 +157,8 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 json!({
                     "target_prefix": target_prefix,
                     "changed": changed + pip_changed,
-                    "specs": all_specs,
-                    "pip_specs": pip_specs,
+                    "specs": normalized.conda_specs,
+                    "pip_specs": normalized.pip_specs,
                     "actions": {
                         "link": link_actions,
                     },
@@ -342,6 +305,62 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             }
         },
     }
+}
+
+fn normalize_request_inputs(
+    cli_specs: Vec<String>,
+    file: Option<std::path::PathBuf>,
+    base_channels: &[String],
+    cli_channels: &[String],
+) -> Result<NormalizedRequestInputs, CoreError> {
+    let mut conda_specs = cli_specs;
+    let mut pip_specs = Vec::new();
+    let mut yaml_name = None;
+    let mut yaml_file_stem = None;
+    let mut yaml_channels = Vec::new();
+
+    if let Some(path) = file {
+        let parsed = parse_env_file(&path)?;
+        conda_specs.extend(parsed.conda_specs);
+        pip_specs.extend(parsed.pip_specs);
+        yaml_name = parsed.name;
+        yaml_file_stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        yaml_channels = parsed.channels;
+    }
+
+    Ok(NormalizedRequestInputs {
+        conda_specs,
+        pip_specs,
+        yaml_name,
+        yaml_file_stem,
+        channels: effective_channels(base_channels, cli_channels, &yaml_channels),
+    })
+}
+
+fn resolve_create_target_prefix(
+    globals: &crate::types::CliGlobalOptions,
+    root_prefix: &std::path::Path,
+    yaml_name: Option<&str>,
+    yaml_file_stem: Option<&str>,
+) -> Result<std::path::PathBuf, CoreError> {
+    globals
+        .prefix
+        .clone()
+        .or_else(|| {
+            globals
+                .name
+                .as_ref()
+                .map(|name| root_prefix.join("envs").join(name))
+        })
+        .or_else(|| yaml_name.map(|name| root_prefix.join("envs").join(name)))
+        .or_else(|| yaml_file_stem.map(|name| root_prefix.join("envs").join(name)))
+        .or_else(|| std::env::var_os("CONDA_PREFIX").map(std::path::PathBuf::from))
+        .ok_or(CoreError::MissingTargetPrefix)
 }
 
 fn effective_channels(

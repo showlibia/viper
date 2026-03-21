@@ -9,6 +9,8 @@ This document tracks command-level behavior alignment using upstream `mamba/` so
 | `create` | Reject conflicting `--prefix` + `--name` | `mamba/micromamba/tests/test_create.py` (target-prefix selection paths) | `crates/viper-cli/tests/cli_smoke.rs` `create_rejects_prefix_and_name_together` |
 | `create` | `--dry-run` returns planned actions and avoids writes | `mamba/micromamba/tests/test_create.py#test_create_dry_run` | `crates/viper-cli/tests/cli_smoke.rs` `create_dry_run_returns_transaction_actions` |
 | `create` | Env-file YAML name determines env name when provided | `mamba/micromamba/tests/test_create.py` env-file creation cases | `crates/viper-cli/tests/cli_smoke.rs` `create_from_env_file_uses_yaml_name_channels_and_pip_specs` |
+| `create` | `--name` takes precedence over YAML `name` | `mamba/micromamba/tests/test_install.py` target-prefix precedence matrix | `crates/viper-cli/tests/cli_smoke.rs` `create_from_env_file_prefers_cli_name_over_yaml_name` |
+| `create` | `--prefix` takes precedence over YAML `name` | `mamba/micromamba/tests/test_install.py` target-prefix precedence matrix | `crates/viper-cli/tests/cli_smoke.rs` `create_from_env_file_prefers_cli_prefix_over_yaml_name` |
 | `create` | Env-file without `name` falls back to file stem | `mamba/micromamba/tests/test_install.py` target-prefix/env-file precedence coverage | `crates/viper-cli/tests/cli_smoke.rs` `create_from_env_file_without_name_uses_file_stem_for_prefix` |
 | `create` | Env-file `name` must be an env name, not a prefix path | `mamba/libmamba/src/api/configuration.cpp` `file_spec_env_name_hook`; `mamba/micromamba/tests/test_install.py` `yaml_name == "prefix"` failure path | `crates/viper-cli/tests/cli_smoke.rs` `create_from_env_file_rejects_name_with_path_separator` |
 | `install` | Missing target prefix fails | `mamba/micromamba/tests/test_install.py` target-prefix checks (`MAMBA_NOT_ALLOW_MISSING_PREFIX`) | `crates/viper-cli/tests/cli_smoke.rs` `install_remove_list_fail_when_prefix_missing` |
@@ -20,6 +22,21 @@ This document tracks command-level behavior alignment using upstream `mamba/` so
 | `list` | Non-managed prefix fails | `mamba/micromamba/tests/test_list.py` env-prefix validity checks | `crates/viper-cli/tests/cli_smoke.rs` `install_remove_list_fail_for_unmanaged_prefix` |
 | `info` | Returns JSON metadata envelope | `mamba/micromamba/src/info.cpp` and JSON output paths | `crates/viper-cli/tests/cli_smoke.rs` `config_set_get_and_info` |
 | `config` | `set/get` roundtrip persists and reads values | `mamba/micromamba/src/config.cpp` | `crates/viper-cli/tests/cli_smoke.rs` `config_set_get_and_info` |
+
+## Pending List Surface
+
+The following upstream `list` options are defined in `mamba/micromamba/src/list.cpp` but are not yet implemented in `viper-cli`:
+
+- `regex`
+- `--full-name`
+- `--no-pip`
+- `--reverse`
+- `--explicit`
+- `--md5`
+- `--sha256`
+- `--canonical`
+- `--export`
+- `--revisions`
 
 ## Repodata and Parser Matrix
 
