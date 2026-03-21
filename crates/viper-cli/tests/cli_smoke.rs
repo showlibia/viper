@@ -538,6 +538,172 @@ dependencies:
 }
 
 #[test]
+fn create_accumulates_yaml_and_rc_channels_in_order() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    write_viperrc(tmp_home.path(), "channels:\n  - rc-channel\n");
+
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+channels:
+  - yaml-channel
+dependencies:
+  - python
+"#,
+    )
+    .expect("write env file");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &[
+            "https://conda.anaconda.org/yaml-channel",
+            "https://conda.anaconda.org/rc-channel",
+        ],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "create",
+            "--offline",
+            "--dry-run",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(
+        body["data"]["channels"],
+        serde_json::json!(["yaml-channel", "rc-channel"])
+    );
+}
+
+#[test]
+fn create_merges_multiple_env_files_specs() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+
+    let first = tmp.path().join("first.yaml");
+    fs::write(
+        &first,
+        r#"
+dependencies:
+  - python
+"#,
+    )
+    .expect("write first env file");
+    let second = tmp.path().join("second.yaml");
+    fs::write(
+        &second,
+        r#"
+dependencies:
+  - pip
+  - pip:
+      - numpy==2.0.0
+"#,
+    )
+    .expect("write second env file");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("pip", "24.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            first.to_str().expect("utf8"),
+            "-f",
+            second.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], true);
+    assert!(
+        body["data"]["specs"]
+            .as_array()
+            .is_some_and(|v| v.len() >= 2)
+    );
+    assert!(
+        body["data"]["pip_specs"]
+            .as_array()
+            .is_some_and(|v| v.iter().any(|x| x == "numpy==2.0.0"))
+    );
+}
+
+#[test]
+fn create_rejects_conflicting_names_across_env_files() {
+    let tmp = tempdir().expect("create temp dir");
+    let first = tmp.path().join("first.yaml");
+    fs::write(
+        &first,
+        r#"
+name: env-one
+dependencies:
+  - python
+"#,
+    )
+    .expect("write first env file");
+    let second = tmp.path().join("second.yaml");
+    fs::write(
+        &second,
+        r#"
+name: env-two
+dependencies:
+  - pip
+"#,
+    )
+    .expect("write second env file");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .args([
+            "--no-rc",
+            "create",
+            "-f",
+            first.to_str().expect("utf8"),
+            "-f",
+            second.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], false);
+    assert_eq!(
+        body["error"],
+        "invalid environment file: conflicting environment names across files"
+    );
+}
+
+#[test]
 fn create_dry_run_returns_transaction_actions() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
@@ -859,4 +1025,10 @@ fn seed_repodata_cache(home: &Path, channels: &[&str], packages: &[(&str, &str, 
             .expect("write repodata state");
         }
     }
+}
+
+fn write_viperrc(home: &Path, content: &str) {
+    let rc_dir = home.join(".viper");
+    fs::create_dir_all(&rc_dir).expect("create rc dir");
+    fs::write(rc_dir.join("viperrc"), content).expect("write viperrc");
 }

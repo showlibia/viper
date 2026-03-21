@@ -30,9 +30,9 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
     )?;
 
     match op {
-        CliOperation::Create { specs, file } => {
+        CliOperation::Create { specs, files } => {
             let normalized =
-                normalize_request_inputs(specs, file, &config.channels, &globals.channels)?;
+                normalize_request_inputs(specs, files, &config.channels, &globals.channels)?;
             let target_prefix = resolve_create_target_prefix(
                 &globals,
                 &config.root_prefix,
@@ -95,7 +95,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             );
             Ok(result)
         }
-        CliOperation::Install { specs, file } => {
+        CliOperation::Install { specs, files } => {
             let target_prefix = config
                 .target_prefix
                 .clone()
@@ -112,7 +112,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             }
 
             let normalized =
-                normalize_request_inputs(specs, file, &config.channels, &globals.channels)?;
+                normalize_request_inputs(specs, files, &config.channels, &globals.channels)?;
             let repodata_filename = select_repodata_filename(&normalized.conda_specs);
             let repodata = if normalized.conda_specs.is_empty() {
                 Vec::new()
@@ -309,7 +309,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
 
 fn normalize_request_inputs(
     cli_specs: Vec<String>,
-    file: Option<std::path::PathBuf>,
+    files: Vec<std::path::PathBuf>,
     base_channels: &[String],
     cli_channels: &[String],
 ) -> Result<NormalizedRequestInputs, CoreError> {
@@ -319,18 +319,32 @@ fn normalize_request_inputs(
     let mut yaml_file_stem = None;
     let mut yaml_channels = Vec::new();
 
-    if let Some(path) = file {
+    for path in files {
         let parsed = parse_env_file(&path)?;
         conda_specs.extend(parsed.conda_specs);
         pip_specs.extend(parsed.pip_specs);
-        yaml_name = parsed.name;
-        yaml_file_stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned);
-        yaml_channels = parsed.channels;
+        yaml_channels.extend(parsed.channels);
+
+        if let Some(name) = parsed.name {
+            match yaml_name.as_ref() {
+                Some(existing) if existing != &name => {
+                    return Err(CoreError::InvalidEnvironmentFile(
+                        "conflicting environment names across files".to_string(),
+                    ));
+                }
+                None => yaml_name = Some(name),
+                _ => {}
+            }
+        }
+
+        if yaml_file_stem.is_none() {
+            yaml_file_stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned);
+        }
     }
 
     Ok(NormalizedRequestInputs {
@@ -369,10 +383,15 @@ fn effective_channels(
     yaml_channels: &[String],
 ) -> Vec<String> {
     if !cli_channels.is_empty() {
-        return dedup_channels(cli_channels.iter().chain(yaml_channels.iter()));
+        return dedup_channels(
+            cli_channels
+                .iter()
+                .chain(yaml_channels.iter())
+                .chain(base_channels.iter()),
+        );
     }
     if !yaml_channels.is_empty() {
-        return dedup_channels(yaml_channels.iter());
+        return dedup_channels(yaml_channels.iter().chain(base_channels.iter()));
     }
     base_channels.to_vec()
 }

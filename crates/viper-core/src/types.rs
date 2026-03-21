@@ -22,11 +22,11 @@ pub struct CliGlobalOptions {
 pub enum CliOperation {
     Create {
         specs: Vec<String>,
-        file: Option<PathBuf>,
+        files: Vec<PathBuf>,
     },
     Install {
         specs: Vec<String>,
-        file: Option<PathBuf>,
+        files: Vec<PathBuf>,
     },
     Remove {
         specs: Vec<String>,

@@ -67,7 +67,7 @@ struct PackageArgs {
     specs: Vec<String>,
 
     #[arg(short = 'f', long = "file")]
-    file: Option<PathBuf>,
+    files: Vec<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -119,11 +119,11 @@ fn run() -> Result<()> {
     let op = match cli.command {
         Commands::Create(args) => CliOperation::Create {
             specs: args.specs,
-            file: args.file,
+            files: args.files,
         },
         Commands::Install(args) => CliOperation::Install {
             specs: args.specs,
-            file: args.file,
+            files: args.files,
         },
         Commands::Remove(args) => CliOperation::Remove {
             specs: args.specs,
