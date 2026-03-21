@@ -141,15 +141,15 @@ pub fn build_config(input: ConfigInput, store: &ConfigStore) -> Result<Config, C
         .or(rc.root_prefix)
         .unwrap_or(default_root);
 
-    let channels = if !input.globals.channels.is_empty() {
-        input.globals.channels.clone()
-    } else if let Some(ch) = env_channels {
-        ch
-    } else if let Some(ch) = rc.channels {
-        ch
-    } else {
-        vec!["conda-forge".to_string()]
-    };
+    let mut channels = Vec::new();
+    if let Some(env) = env_channels {
+        channels.extend(env);
+    }
+    if let Some(rc_channels) = rc.channels.clone() {
+        channels.extend(rc_channels);
+    }
+    channels.push("conda-forge".to_string());
+    let channels = dedup_channels(channels);
 
     let target_prefix = resolve_target_prefix(
         input.globals.prefix.clone(),
@@ -176,6 +176,16 @@ pub fn build_config(input: ConfigInput, store: &ConfigStore) -> Result<Config, C
         json: input.globals.json,
         verbose: input.globals.verbose,
     })
+}
+
+fn dedup_channels(channels: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for channel in channels {
+        if !out.iter().any(|c| c == &channel) {
+            out.push(channel);
+        }
+    }
+    out
 }
 
 fn resolve_target_prefix(

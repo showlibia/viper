@@ -16,6 +16,7 @@ struct NormalizedRequestInputs {
     yaml_name: Option<String>,
     yaml_file_stem: Option<String>,
     channels: Vec<String>,
+    warnings: Vec<String>,
 }
 
 pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> {
@@ -79,7 +80,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 state.save(&target_prefix)?;
             }
 
-            let result = OperationResult::ok(
+            let mut result = OperationResult::ok(
                 "environment created",
                 json!({
                     "root_prefix": config.root_prefix,
@@ -93,6 +94,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "dry_run": config.dry_run,
                 }),
             );
+            result.warnings = normalized.warnings;
             Ok(result)
         }
         CliOperation::Install { specs, files } => {
@@ -152,7 +154,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 state.save(&target_prefix)?;
             }
 
-            let result = OperationResult::ok(
+            let mut result = OperationResult::ok(
                 "packages installed",
                 json!({
                     "target_prefix": target_prefix,
@@ -165,6 +167,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "dry_run": config.dry_run,
                 }),
             );
+            result.warnings = normalized.warnings;
             Ok(result)
         }
         CliOperation::Remove { specs, all } => {
@@ -318,6 +321,7 @@ fn normalize_request_inputs(
     let mut yaml_name = None;
     let mut yaml_file_stem = None;
     let mut yaml_channels = Vec::new();
+    let mut warnings = Vec::new();
 
     for path in files {
         let parsed = parse_env_file(&path)?;
@@ -328,8 +332,10 @@ fn normalize_request_inputs(
         if let Some(name) = parsed.name {
             match yaml_name.as_ref() {
                 Some(existing) if existing != &name => {
-                    return Err(CoreError::InvalidEnvironmentFile(
-                        "conflicting environment names across files".to_string(),
+                    warnings.push(format!(
+                        "ignoring environment name '{name}' from '{}' because '{}' is already selected",
+                        path.display(),
+                        existing
                     ));
                 }
                 None => yaml_name = Some(name),
@@ -353,6 +359,7 @@ fn normalize_request_inputs(
         yaml_name,
         yaml_file_stem,
         channels: effective_channels(base_channels, cli_channels, &yaml_channels),
+        warnings,
     })
 }
 

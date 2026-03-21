@@ -560,6 +560,7 @@ dependencies:
         &[
             "https://conda.anaconda.org/yaml-channel",
             "https://conda.anaconda.org/rc-channel",
+            "https://conda.anaconda.org/conda-forge",
         ],
         &[("python", "3.12.0", "0")],
     );
@@ -585,7 +586,7 @@ dependencies:
     let body: Value = serde_json::from_slice(&output).expect("valid json");
     assert_eq!(
         body["data"]["channels"],
-        serde_json::json!(["yaml-channel", "rc-channel"])
+        serde_json::json!(["yaml-channel", "rc-channel", "conda-forge"])
     );
 }
 
@@ -656,8 +657,9 @@ dependencies:
 }
 
 #[test]
-fn create_rejects_conflicting_names_across_env_files() {
+fn create_multiple_env_files_keep_first_name_and_warn() {
     let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
     let first = tmp.path().join("first.yaml");
     fs::write(
         &first,
@@ -678,12 +680,19 @@ dependencies:
 "#,
     )
     .expect("write second env file");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("pip", "24.0", "0")],
+    );
 
     let mut create = Command::cargo_bin("viper").expect("binary exists");
     let output = create
+        .env("HOME", tmp_home.path())
         .args([
             "--no-rc",
             "create",
+            "--offline",
             "-f",
             first.to_str().expect("utf8"),
             "-f",
@@ -691,15 +700,134 @@ dependencies:
             "--json",
         ])
         .assert()
-        .failure()
+        .success()
         .get_output()
         .stdout
         .clone();
     let body: Value = serde_json::from_slice(&output).expect("valid json");
-    assert_eq!(body["success"], false);
+    assert_eq!(body["success"], true);
+    let expected_prefix = tmp_home.path().join(".viper").join("envs").join("env-one");
     assert_eq!(
-        body["error"],
-        "invalid environment file: conflicting environment names across files"
+        body["data"]["target_prefix"],
+        expected_prefix.display().to_string()
+    );
+    assert!(body["warnings"].as_array().is_some_and(|w| {
+        !w.is_empty()
+            && w[0]
+                .as_str()
+                .unwrap_or("")
+                .contains("ignoring environment name")
+    }));
+}
+
+#[test]
+fn create_accumulates_cli_yaml_rc_and_default_channels() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    write_viperrc(tmp_home.path(), "channels:\n  - rc-channel\n");
+
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+channels:
+  - yaml-channel
+dependencies:
+  - python
+"#,
+    )
+    .expect("write env file");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &[
+            "https://conda.anaconda.org/cli-channel",
+            "https://conda.anaconda.org/yaml-channel",
+            "https://conda.anaconda.org/rc-channel",
+            "https://conda.anaconda.org/conda-forge",
+        ],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "create",
+            "--offline",
+            "--dry-run",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-c",
+            "cli-channel",
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(
+        body["data"]["channels"],
+        serde_json::json!(["cli-channel", "yaml-channel", "rc-channel", "conda-forge"])
+    );
+}
+
+#[test]
+fn create_accumulates_yaml_env_rc_and_default_channels() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    write_viperrc(tmp_home.path(), "channels:\n  - rc-channel\n");
+
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+channels:
+  - yaml-channel
+dependencies:
+  - python
+"#,
+    )
+    .expect("write env file");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &[
+            "https://conda.anaconda.org/yaml-channel",
+            "https://conda.anaconda.org/env-channel",
+            "https://conda.anaconda.org/rc-channel",
+            "https://conda.anaconda.org/conda-forge",
+        ],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .env("VIPER_CHANNELS", "env-channel")
+        .args([
+            "create",
+            "--offline",
+            "--dry-run",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(
+        body["data"]["channels"],
+        serde_json::json!(["yaml-channel", "env-channel", "rc-channel", "conda-forge"])
     );
 }
 
