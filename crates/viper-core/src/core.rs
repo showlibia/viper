@@ -34,14 +34,11 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
         CliOperation::Create { specs, files } => {
             let mut normalized =
                 normalize_request_inputs(specs, files, &config.channels, &globals.channels)?;
-            if let (Some(cli_name), Some(yaml_name)) =
-                (globals.name.as_deref(), normalized.yaml_name.as_deref())
-                && cli_name != yaml_name
-            {
-                normalized.warnings.push(format!(
-                    "ignoring environment name '{yaml_name}' from env file because '--name {cli_name}' is set"
-                ));
-            }
+            maybe_warn_cli_name_override(
+                globals.name.as_deref(),
+                normalized.yaml_name.as_deref(),
+                &mut normalized.warnings,
+            );
             let target_prefix = resolve_create_target_prefix(
                 &globals,
                 &config.root_prefix,
@@ -123,14 +120,11 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
 
             let mut normalized =
                 normalize_request_inputs(specs, files, &config.channels, &globals.channels)?;
-            if let (Some(cli_name), Some(yaml_name)) =
-                (globals.name.as_deref(), normalized.yaml_name.as_deref())
-                && cli_name != yaml_name
-            {
-                normalized.warnings.push(format!(
-                    "ignoring environment name '{yaml_name}' from env file because '--name {cli_name}' is set"
-                ));
-            }
+            maybe_warn_cli_name_override(
+                globals.name.as_deref(),
+                normalized.yaml_name.as_deref(),
+                &mut normalized.warnings,
+            );
             let repodata_filename = select_repodata_filename(&normalized.conda_specs);
             let repodata = if normalized.conda_specs.is_empty() {
                 Vec::new()
@@ -417,6 +411,20 @@ fn effective_channels(
         return dedup_channels(yaml_channels.iter().chain(base_channels.iter()));
     }
     base_channels.to_vec()
+}
+
+fn maybe_warn_cli_name_override(
+    cli_name: Option<&str>,
+    yaml_name: Option<&str>,
+    warnings: &mut Vec<String>,
+) {
+    if let (Some(cli_name), Some(yaml_name)) = (cli_name, yaml_name)
+        && cli_name != yaml_name
+    {
+        warnings.push(format!(
+            "ignoring environment name '{yaml_name}' from env file because '--name {cli_name}' is set"
+        ));
+    }
 }
 
 fn dedup_channels<'a>(channels: impl Iterator<Item = &'a String>) -> Vec<String> {
