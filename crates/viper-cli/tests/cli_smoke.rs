@@ -345,6 +345,105 @@ dependencies:
 }
 
 #[test]
+fn create_from_env_file_rejects_name_with_path_separator() {
+    let tmp = tempdir().expect("create temp dir");
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+name: /tmp/absolute-target
+dependencies:
+  - python
+"#,
+    )
+    .expect("write env file");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .args([
+            "--no-rc",
+            "create",
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], false);
+    assert_eq!(
+        body["error"],
+        "invalid environment file: environment name cannot contain path separators"
+    );
+}
+
+#[test]
+fn install_from_env_file_rejects_name_with_path_separator() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("pip", "24.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let spec_file = tmp.path().join("bad-name.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+name: /tmp/bad
+dependencies:
+  - pip
+"#,
+    )
+    .expect("write env file");
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    let output = install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], false);
+    assert_eq!(
+        body["error"],
+        "invalid environment file: environment name cannot contain path separators"
+    );
+}
+
+#[test]
 fn create_dry_run_returns_transaction_actions() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");

@@ -97,6 +97,13 @@ pub fn parse_env_file(path: &Path) -> Result<EnvSpecFile, CoreError> {
         .name
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty());
+    if let Some(env_name) = name.as_ref()
+        && (env_name.contains('/') || env_name.contains('\\'))
+    {
+        return Err(CoreError::InvalidEnvironmentFile(
+            "environment name cannot contain path separators".to_string(),
+        ));
+    }
     let channels = parsed
         .channels
         .unwrap_or_default()
@@ -215,5 +222,69 @@ dependencies:
         let err = parse_env_file(&file).expect_err("must reject unsupported mapping");
         assert!(matches!(err, CoreError::InvalidEnvironmentFile(_)));
         assert!(err.to_string().contains("unsupported dependency mapping"));
+    }
+
+    #[test]
+    fn parse_environment_file_rejects_pip_non_sequence() {
+        let tmp = tempdir().expect("create temp dir");
+        let file = tmp.path().join("env.yaml");
+        fs::write(
+            &file,
+            r#"
+dependencies:
+  - pip: numpy==2.0.0
+"#,
+        )
+        .expect("write env yaml");
+
+        let err = parse_env_file(&file).expect_err("must reject pip non-sequence");
+        assert!(matches!(err, CoreError::InvalidEnvironmentFile(_)));
+        assert!(
+            err.to_string()
+                .contains("pip dependency section must be a sequence")
+        );
+    }
+
+    #[test]
+    fn parse_environment_file_rejects_non_string_dependency_entry() {
+        let tmp = tempdir().expect("create temp dir");
+        let file = tmp.path().join("env.yaml");
+        fs::write(
+            &file,
+            r#"
+dependencies:
+  - 3
+"#,
+        )
+        .expect("write env yaml");
+
+        let err = parse_env_file(&file).expect_err("must reject unsupported dependency entry");
+        assert!(matches!(err, CoreError::InvalidEnvironmentFile(_)));
+        assert!(
+            err.to_string()
+                .contains("unsupported dependency entry type")
+        );
+    }
+
+    #[test]
+    fn parse_environment_file_rejects_name_with_path_separator() {
+        let tmp = tempdir().expect("create temp dir");
+        let file = tmp.path().join("env.yaml");
+        fs::write(
+            &file,
+            r#"
+name: /tmp/absolute-prefix
+dependencies:
+  - python
+"#,
+        )
+        .expect("write env yaml");
+
+        let err = parse_env_file(&file).expect_err("must reject env name path");
+        assert!(matches!(err, CoreError::InvalidEnvironmentFile(_)));
+        assert!(
+            err.to_string()
+                .contains("environment name cannot contain path separators")
+        );
     }
 }
