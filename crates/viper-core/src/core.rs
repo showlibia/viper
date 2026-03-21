@@ -121,8 +121,16 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 ));
             }
 
-            let normalized =
+            let mut normalized =
                 normalize_request_inputs(specs, files, &config.channels, &globals.channels)?;
+            if let (Some(cli_name), Some(yaml_name)) =
+                (globals.name.as_deref(), normalized.yaml_name.as_deref())
+                && cli_name != yaml_name
+            {
+                normalized.warnings.push(format!(
+                    "ignoring environment name '{yaml_name}' from env file because '--name {cli_name}' is set"
+                ));
+            }
             let repodata_filename = select_repodata_filename(&normalized.conda_specs);
             let repodata = if normalized.conda_specs.is_empty() {
                 Vec::new()

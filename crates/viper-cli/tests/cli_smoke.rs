@@ -546,6 +546,72 @@ dependencies:
 }
 
 #[test]
+fn install_prefers_cli_name_over_yaml_name_and_warns() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("pip", "24.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-n",
+            "from-cli",
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+name: from-yaml
+dependencies:
+  - pip
+"#,
+    )
+    .expect("write env file");
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    let output = install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-n",
+            "from-cli",
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], true);
+    assert!(
+        body["warnings"]
+            .as_array()
+            .is_some_and(|w| w.iter().any(|msg| msg
+                .as_str()
+                .unwrap_or("")
+                .contains("ignoring environment name 'from-yaml'")))
+    );
+}
+
+#[test]
 fn create_accumulates_yaml_and_rc_channels_in_order() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
