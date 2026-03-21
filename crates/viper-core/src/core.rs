@@ -32,8 +32,16 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
 
     match op {
         CliOperation::Create { specs, files } => {
-            let normalized =
+            let mut normalized =
                 normalize_request_inputs(specs, files, &config.channels, &globals.channels)?;
+            if let (Some(cli_name), Some(yaml_name)) =
+                (globals.name.as_deref(), normalized.yaml_name.as_deref())
+                && cli_name != yaml_name
+            {
+                normalized.warnings.push(format!(
+                    "ignoring environment name '{yaml_name}' from env file because '--name {cli_name}' is set"
+                ));
+            }
             let target_prefix = resolve_create_target_prefix(
                 &globals,
                 &config.root_prefix,

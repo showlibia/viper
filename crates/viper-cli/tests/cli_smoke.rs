@@ -389,6 +389,14 @@ dependencies:
         body["data"]["target_prefix"],
         expected_prefix.display().to_string()
     );
+    assert!(
+        body["warnings"]
+            .as_array()
+            .is_some_and(|w| w.iter().any(|msg| msg
+                .as_str()
+                .unwrap_or("")
+                .contains("ignoring environment name 'from-yaml'")))
+    );
 }
 
 #[test]
