@@ -63,14 +63,33 @@ pub fn parse_env_file(path: &Path) -> Result<EnvSpecFile, CoreError> {
 
             if let Some(mapping) = dep.as_mapping() {
                 let pip_key = serde_yaml::Value::String("pip".to_string());
-                if let Some(pip_section) = mapping.get(&pip_key).and_then(|x| x.as_sequence()) {
-                    for entry in pip_section {
-                        if let Some(s) = entry.as_str() {
-                            pip_specs.push(normalize_spec(s)?);
-                        }
-                    }
+                if mapping.len() != 1 || !mapping.contains_key(&pip_key) {
+                    return Err(CoreError::InvalidEnvironmentFile(
+                        "unsupported dependency mapping; only 'pip' is allowed".to_string(),
+                    ));
                 }
+                let pip_section = mapping
+                    .get(&pip_key)
+                    .and_then(|x| x.as_sequence())
+                    .ok_or_else(|| {
+                        CoreError::InvalidEnvironmentFile(
+                            "pip dependency section must be a sequence".to_string(),
+                        )
+                    })?;
+                for entry in pip_section {
+                    let spec = entry.as_str().ok_or_else(|| {
+                        CoreError::InvalidEnvironmentFile(
+                            "pip dependency entries must be strings".to_string(),
+                        )
+                    })?;
+                    pip_specs.push(normalize_spec(spec)?);
+                }
+                continue;
             }
+
+            return Err(CoreError::InvalidEnvironmentFile(
+                "unsupported dependency entry type".to_string(),
+            ));
         }
     }
 
@@ -154,5 +173,47 @@ channels:
         assert_eq!(parsed.name.as_deref(), Some("empty"));
         assert!(parsed.conda_specs.is_empty());
         assert!(parsed.pip_specs.is_empty());
+    }
+
+    #[test]
+    fn parse_environment_file_rejects_non_string_pip_entry() {
+        let tmp = tempdir().expect("create temp dir");
+        let file = tmp.path().join("env.yaml");
+        fs::write(
+            &file,
+            r#"
+dependencies:
+  - pip:
+      - numpy==2.0.0
+      - 3
+"#,
+        )
+        .expect("write env yaml");
+
+        let err = parse_env_file(&file).expect_err("must reject invalid pip entry");
+        assert!(matches!(err, CoreError::InvalidEnvironmentFile(_)));
+        assert!(
+            err.to_string()
+                .contains("pip dependency entries must be strings")
+        );
+    }
+
+    #[test]
+    fn parse_environment_file_rejects_unknown_dependency_mapping() {
+        let tmp = tempdir().expect("create temp dir");
+        let file = tmp.path().join("env.yaml");
+        fs::write(
+            &file,
+            r#"
+dependencies:
+  - conda:
+      - python
+"#,
+        )
+        .expect("write env yaml");
+
+        let err = parse_env_file(&file).expect_err("must reject unsupported mapping");
+        assert!(matches!(err, CoreError::InvalidEnvironmentFile(_)));
+        assert!(err.to_string().contains("unsupported dependency mapping"));
     }
 }

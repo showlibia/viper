@@ -26,12 +26,19 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let mut all_specs = specs;
             let mut pip_specs = Vec::new();
             let mut file_name = None;
+            let mut file_stem_name = None;
             let mut file_channels = Vec::new();
             if let Some(path) = file {
                 let file_specs = parse_env_file(&path)?;
                 all_specs.extend(file_specs.conda_specs);
                 pip_specs.extend(file_specs.pip_specs);
                 file_name = file_specs.name;
+                file_stem_name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned);
                 file_channels = file_specs.channels;
             }
 
@@ -46,6 +53,11 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 })
                 .or_else(|| {
                     file_name
+                        .as_ref()
+                        .map(|name| config.root_prefix.join("envs").join(name))
+                })
+                .or_else(|| {
+                    file_stem_name
                         .as_ref()
                         .map(|name| config.root_prefix.join("envs").join(name))
                 })
