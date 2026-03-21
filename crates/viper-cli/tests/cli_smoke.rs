@@ -328,21 +328,23 @@ fn offline_with_cache_works() {
     fs::create_dir_all(&cache_root).expect("create cache root");
 
     let channel = "https://conda.anaconda.org/conda-forge";
-    let subdir = "linux-64";
-    let key = cache_name_from_repodata_url(&format!("{channel}/{subdir}/current_repodata.json"));
-    fs::write(
-        cache_root.join(format!("{key}.json")),
-        r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
-    )
-    .expect("write repodata cache");
-    fs::write(
-        cache_root.join(format!("{key}.state.json")),
-        format!(
-            "{{\"fetched_at_epoch_s\":{},\"cache_control\":\"max-age=3600\"}}",
-            4_102_444_800u64
-        ),
-    )
-    .expect("write repodata state");
+    for subdir in [current_platform_subdir(), "noarch".to_string()] {
+        let key =
+            cache_name_from_repodata_url(&format!("{channel}/{subdir}/current_repodata.json"));
+        fs::write(
+            cache_root.join(format!("{key}.json")),
+            r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+        )
+        .expect("write repodata cache");
+        fs::write(
+            cache_root.join(format!("{key}.state.json")),
+            format!(
+                "{{\"fetched_at_epoch_s\":{},\"cache_control\":\"max-age=3600\"}}",
+                4_102_444_800u64
+            ),
+        )
+        .expect("write repodata state");
+    }
 
     let mut create = Command::cargo_bin("viper").expect("binary exists");
     let output = create
@@ -401,4 +403,17 @@ fn cache_name_from_repodata_url(url: &str) -> String {
     }
     let digest = md5::compute(normalized.as_bytes());
     format!("{digest:x}")[..8].to_string()
+}
+
+fn current_platform_subdir() -> String {
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    match (os, arch) {
+        ("linux", "x86_64") => "linux-64".to_string(),
+        ("linux", "aarch64") => "linux-aarch64".to_string(),
+        ("macos", "x86_64") => "osx-64".to_string(),
+        ("macos", "aarch64") => "osx-arm64".to_string(),
+        ("windows", "x86_64") => "win-64".to_string(),
+        _ => format!("{os}-{arch}"),
+    }
 }

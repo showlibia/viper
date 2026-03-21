@@ -64,12 +64,10 @@ pub fn fetch_packages(
     };
 
     let mut out = Vec::new();
-    let mut loaded_any = false;
-    let mut last_err = None;
     for channel in channels {
         let normalized = normalize_channel(channel);
         for subdir in [platform_subdir, "noarch"] {
-            let entry = match fetch_subdir(
+            let entry = fetch_subdir(
                 client.as_ref(),
                 &normalized,
                 subdir,
@@ -77,19 +75,9 @@ pub fn fetch_packages(
                 cache_root,
                 local_repodata_ttl,
                 repodata_filename,
-            ) {
-                Ok(entry) => entry,
-                Err(err) => {
-                    last_err = Some(err);
-                    continue;
-                }
-            };
-            loaded_any = true;
+            )?;
             out.extend(parse_records(&normalized, subdir, entry));
         }
-    }
-    if !loaded_any {
-        return Err(last_err.unwrap_or(CoreError::OfflineRepodataUnavailable));
     }
     Ok(out)
 }
@@ -227,7 +215,15 @@ fn should_use_cache(
     }
     let age = now - meta.fetched_at_epoch_s;
     let max_age = if local_repodata_ttl == 1 {
-        cache_control_max_age(meta.cache_control.as_deref()).unwrap_or(3600)
+        cache_control_max_age(meta.cache_control.as_deref())
+            .or_else(|| {
+                if cache_control_requires_revalidation(meta.cache_control.as_deref()) {
+                    Some(0)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(3600)
     } else {
         local_repodata_ttl as u64
     };
@@ -268,6 +264,16 @@ fn cache_control_max_age(header: Option<&str>) -> Option<u64> {
         }
     }
     None
+}
+
+fn cache_control_requires_revalidation(header: Option<&str>) -> bool {
+    let Some(header) = header else {
+        return false;
+    };
+    header
+        .split(',')
+        .map(|part| part.trim().to_ascii_lowercase())
+        .any(|directive| directive == "no-cache" || directive == "must-revalidate")
 }
 
 struct CachePaths {
@@ -330,33 +336,49 @@ mod tests {
     }
 
     #[test]
+    fn no_cache_requires_immediate_revalidation_for_ttl_one() {
+        let raw = Some("{}".to_string());
+        let now = now_epoch_s();
+        let meta = CacheMeta {
+            fetched_at_epoch_s: now.saturating_sub(10),
+            cache_control: Some("public, no-cache".to_string()),
+            etag: None,
+            last_modified: None,
+            url: None,
+        };
+        assert!(!should_use_cache(1, Some(&meta), &raw));
+    }
+
+    #[test]
     fn offline_uses_cached_repodata() {
         let tmp = tempdir().expect("temp dir");
         let cache_root = tmp.path().join("cache");
         fs::create_dir_all(&cache_root).expect("create cache dir");
         let channel = "https://conda.anaconda.org/conda-forge";
         let subdir = "linux-64";
-        let paths = cache_paths(
-            &cache_root,
-            &format!("{channel}/{subdir}/current_repodata.json"),
-        );
-        fs::write(
-            &paths.json,
-            r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
-        )
-        .expect("write json cache");
-        fs::write(
-            &paths.meta,
-            serde_json::to_vec(&CacheMeta {
-                fetched_at_epoch_s: now_epoch_s().saturating_sub(10),
-                cache_control: Some("max-age=300".to_string()),
-                etag: None,
-                last_modified: None,
-                url: None,
-            })
-            .expect("serialize meta"),
-        )
-        .expect("write meta");
+        for subdir in [subdir, "noarch"] {
+            let paths = cache_paths(
+                &cache_root,
+                &format!("{channel}/{subdir}/current_repodata.json"),
+            );
+            fs::write(
+                &paths.json,
+                r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+            )
+            .expect("write json cache");
+            fs::write(
+                &paths.meta,
+                serde_json::to_vec(&CacheMeta {
+                    fetched_at_epoch_s: now_epoch_s().saturating_sub(10),
+                    cache_control: Some("max-age=300".to_string()),
+                    etag: None,
+                    last_modified: None,
+                    url: None,
+                })
+                .expect("serialize meta"),
+            )
+            .expect("write meta");
+        }
 
         let pkgs = fetch_packages(
             &[channel.to_string()],
