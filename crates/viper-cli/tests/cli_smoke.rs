@@ -396,6 +396,101 @@ fn create_fails_without_repodata_and_does_not_write_state() {
     assert!(!state_file.exists());
 }
 
+#[test]
+fn install_remove_list_fail_when_prefix_missing() {
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("missing-env");
+    let expected = format!("prefix '{}' does not exist", prefix.display());
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    install
+        .args([
+            "--no-rc",
+            "install",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(contains(&expected));
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(contains(&expected));
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    list.args([
+        "--no-rc",
+        "list",
+        "-p",
+        prefix.to_str().expect("utf8"),
+        "--json",
+    ])
+    .assert()
+    .failure()
+    .stdout(contains(&expected));
+}
+
+#[test]
+fn install_remove_list_fail_for_unmanaged_prefix() {
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("plain-dir");
+    fs::create_dir_all(&prefix).expect("create prefix dir");
+    let expected = format!("prefix '{}' is not a managed environment", prefix.display());
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    install
+        .args([
+            "--no-rc",
+            "install",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(contains(&expected));
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(contains(&expected));
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    list.args([
+        "--no-rc",
+        "list",
+        "-p",
+        prefix.to_str().expect("utf8"),
+        "--json",
+    ])
+    .assert()
+    .failure()
+    .stdout(contains(&expected));
+}
+
 fn cache_name_from_repodata_url(url: &str) -> String {
     let mut normalized = url.trim_end_matches('/').to_string();
     if normalized.ends_with("/repodata.json") {
