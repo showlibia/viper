@@ -88,10 +88,15 @@ pub fn parse_explicit_url(url: &str) -> Result<ExplicitUrlInfo, CoreError> {
         .map_or((normalized.as_str(), ""), |parts| parts);
     let url_no_fragment = url_no_fragment.to_string();
     let fragment = (!fragment.is_empty()).then(|| fragment.to_string());
-    let filename = url_no_fragment.rsplit('/').next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {normalized}"))
-    })?
-    .to_string();
+    let filename = url_no_fragment
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| {
+            CoreError::InvalidEnvironmentFile(format!(
+                "explicit entry has invalid URL: {normalized}"
+            ))
+        })?
+        .to_string();
     let dist = filename
         .strip_suffix(".tar.bz2")
         .or_else(|| filename.strip_suffix(".conda"))
@@ -103,18 +108,24 @@ pub fn parse_explicit_url(url: &str) -> Result<ExplicitUrlInfo, CoreError> {
         .to_string();
 
     let mut parts = dist.rsplitn(3, '-');
-    let build = parts.next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry missing build: {filename}"))
-    })?
-    .to_string();
-    let version = parts.next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry missing version: {filename}"))
-    })?
-    .to_string();
-    let name = parts.next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry missing name: {filename}"))
-    })?
-    .to_string();
+    let build = parts
+        .next()
+        .ok_or_else(|| {
+            CoreError::InvalidEnvironmentFile(format!("explicit entry missing build: {filename}"))
+        })?
+        .to_string();
+    let version = parts
+        .next()
+        .ok_or_else(|| {
+            CoreError::InvalidEnvironmentFile(format!("explicit entry missing version: {filename}"))
+        })?
+        .to_string();
+    let name = parts
+        .next()
+        .ok_or_else(|| {
+            CoreError::InvalidEnvironmentFile(format!("explicit entry missing name: {filename}"))
+        })?
+        .to_string();
 
     let (prefix, _) = url_no_fragment.rsplit_once('/').ok_or_else(|| {
         CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {normalized}"))
@@ -225,7 +236,7 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpecFile, CoreError> {
         .and_then(|x| x.to_str())
         .unwrap_or_default();
     if matches!(ext, "yml" | "yaml") {
-        if let Some(lock_env) = parse_lockfile(path)? {
+        if let Some(lock_env) = parse_yaml_lockfile(path)? {
             return Ok(ParsedSpecFile {
                 kind: SpecFileKind::Lock,
                 env: lock_env,
@@ -235,6 +246,14 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpecFile, CoreError> {
         return Ok(ParsedSpecFile {
             kind: SpecFileKind::Yaml,
             env,
+        });
+    }
+    if ext.eq_ignore_ascii_case("json")
+        && let Some(lock_env) = parse_mambajs_lockfile(path)?
+    {
+        return Ok(ParsedSpecFile {
+            kind: SpecFileKind::Lock,
+            env: lock_env,
         });
     }
 
@@ -302,7 +321,7 @@ fn validate_explicit_url(url: &str) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn parse_lockfile(path: &Path) -> Result<Option<EnvSpecFile>, CoreError> {
+fn parse_yaml_lockfile(path: &Path) -> Result<Option<EnvSpecFile>, CoreError> {
     let content = fs::read_to_string(path)?;
     let root = match serde_yaml::from_str::<serde_yaml::Value>(&content) {
         Ok(value) => value,
@@ -319,35 +338,48 @@ fn parse_lockfile(path: &Path) -> Result<Option<EnvSpecFile>, CoreError> {
         return Ok(None);
     };
 
+    let current_platform = current_platform_subdir();
     let mut conda_specs = Vec::new();
     let mut pip_specs = Vec::new();
     for package in packages {
         let Some(entry) = package.as_mapping() else {
             continue;
         };
+        if !yaml_lock_entry_matches_platform(entry, &current_platform) {
+            continue;
+        }
         let manager = entry
             .get(serde_yaml::Value::String("manager".to_string()))
             .and_then(|value| value.as_str())
             .unwrap_or("conda");
         if manager == "pip" {
-            let Some(name) = entry
+            if let Some(name) = entry
                 .get(serde_yaml::Value::String("name".to_string()))
                 .and_then(|value| value.as_str())
-            else {
+            {
+                let version = entry
+                    .get(serde_yaml::Value::String("version".to_string()))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                pip_specs.push(format!("{name}=={version}"));
                 continue;
-            };
-            let version = entry
-                .get(serde_yaml::Value::String("version".to_string()))
+            }
+            if let Some(url) = entry
+                .get(serde_yaml::Value::String("url".to_string()))
                 .and_then(|value| value.as_str())
-                .unwrap_or("unknown");
-            pip_specs.push(format!("{name}=={version}"));
+            {
+                pip_specs.push(url.to_string());
+            }
             continue;
         }
         if let Some(url) = entry
             .get(serde_yaml::Value::String("url".to_string()))
             .and_then(|value| value.as_str())
         {
-            validate_explicit_url(url)?;
+            let explicit = parse_explicit_url(url)?;
+            if explicit.subdir != current_platform && explicit.subdir != "noarch" {
+                continue;
+            }
             conda_specs.push(url.to_string());
             continue;
         }
@@ -376,6 +408,105 @@ fn parse_lockfile(path: &Path) -> Result<Option<EnvSpecFile>, CoreError> {
         conda_specs,
         pip_specs,
     }))
+}
+
+fn parse_mambajs_lockfile(path: &Path) -> Result<Option<EnvSpecFile>, CoreError> {
+    let content = fs::read_to_string(path)?;
+    let root = match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if root.get("lockVersion").is_none() || root.get("packages").is_none() {
+        return Ok(None);
+    }
+
+    let current_platform = current_platform_subdir();
+    let mut conda_specs = Vec::new();
+    let mut pip_specs = Vec::new();
+
+    if let Some(packages) = root.get("packages").and_then(|value| value.as_object()) {
+        for (filename, package) in packages {
+            let Some(name) = package.get("name").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let version = package
+                .get("version")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let build = package
+                .get("build")
+                .and_then(|value| value.as_str())
+                .unwrap_or("0");
+            let subdir = package
+                .get("subdir")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&current_platform);
+            if subdir != current_platform && subdir != "noarch" {
+                continue;
+            }
+            let channel = package
+                .get("channel")
+                .and_then(|value| value.as_str())
+                .unwrap_or("conda-forge");
+            let base_url = format!("https://conda.anaconda.org/{channel}");
+            let mut spec = format!("{base_url}/{subdir}/{filename}");
+            if !spec.ends_with(".conda") && !spec.ends_with(".tar.bz2") {
+                spec = format!("{base_url}/{subdir}/{name}-{version}-{build}.conda");
+            }
+            if let Some(hash) = package.get("hash").and_then(|value| value.as_object()) {
+                if let Some(md5) = hash.get("md5").and_then(|value| value.as_str()) {
+                    spec.push('#');
+                    spec.push_str(md5);
+                } else if let Some(sha256) = hash.get("sha256").and_then(|value| value.as_str()) {
+                    spec.push('#');
+                    spec.push_str(sha256);
+                }
+            }
+            conda_specs.push(spec);
+        }
+    }
+
+    if let Some(packages) = root.get("pipPackages").and_then(|value| value.as_object()) {
+        for package in packages.values() {
+            let Some(name) = package.get("name").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let version = package
+                .get("version")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            pip_specs.push(format!("{name}=={version}"));
+        }
+    }
+
+    Ok(Some(EnvSpecFile {
+        name: None,
+        channels: Vec::new(),
+        conda_specs,
+        pip_specs,
+    }))
+}
+
+fn yaml_lock_entry_matches_platform(entry: &serde_yaml::Mapping, current_platform: &str) -> bool {
+    let entry_platform = entry
+        .get(serde_yaml::Value::String("platform".to_string()))
+        .and_then(|value| value.as_str());
+    match entry_platform {
+        Some(platform) if platform == current_platform || platform == "noarch" => true,
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn current_platform_subdir() -> String {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-64".to_string(),
+        ("linux", "aarch64") => "linux-aarch64".to_string(),
+        ("macos", "x86_64") => "osx-64".to_string(),
+        ("macos", "aarch64") => "osx-arm64".to_string(),
+        ("windows", "x86_64") => "win-64".to_string(),
+        (os, arch) => format!("{os}-{arch}"),
+    }
 }
 
 #[cfg(test)]

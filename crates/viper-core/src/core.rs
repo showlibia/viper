@@ -294,6 +294,21 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 .target_prefix
                 .clone()
                 .ok_or(CoreError::MissingTargetPrefix)?;
+            let specs = normalize_and_validate_match_specs(specs)?;
+            if globals.print_config_only {
+                return Ok(OperationResult::ok(
+                    "config rendered",
+                    json!({
+                        "operation": "remove",
+                        "target_prefix": target_prefix,
+                        "specs": specs,
+                        "all": all,
+                        "force": force,
+                        "no_prune_deps": no_prune_deps,
+                        "dry_run": config.dry_run,
+                    }),
+                ));
+            }
             if !target_prefix.exists() {
                 return Err(CoreError::PrefixNotFound(
                     target_prefix.display().to_string(),
@@ -319,7 +334,6 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 ));
             }
 
-            let specs = normalize_and_validate_match_specs(specs)?;
             let state = EnvironmentState::load(&target_prefix)?;
             let mut preview = state.clone();
             let removed = if force {
@@ -541,13 +555,24 @@ fn normalize_request_inputs(
             file_kind_is_yaml = Some(is_yaml);
         }
 
-        if matches!(parsed.kind, SpecFileKind::Explicit | SpecFileKind::Lock) {
+        if parsed.kind == SpecFileKind::Explicit {
             explicit_mode = true;
             explicit_specs = parsed.env.conda_specs;
             conda_specs.clear();
             pip_specs.clear();
             warnings.push(format!(
                 "explicit spec file '{}' switches request into explicit mode",
+                path.display()
+            ));
+            break;
+        }
+        if parsed.kind == SpecFileKind::Lock {
+            explicit_mode = true;
+            explicit_specs = parsed.env.conda_specs;
+            conda_specs.clear();
+            pip_specs = parsed.env.pip_specs;
+            warnings.push(format!(
+                "lockfile '{}' switches request into locked explicit mode",
                 path.display()
             ));
             break;

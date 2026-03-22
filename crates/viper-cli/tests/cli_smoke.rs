@@ -768,6 +768,94 @@ fn remove_force_keeps_dependents_in_unsafe_mode() {
 }
 
 #[test]
+fn remove_print_config_only_is_read_only() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let before_count = installed_package_names(&prefix).len();
+    let history_before =
+        fs::read_to_string(prefix.join("conda-meta").join("history")).expect("read history");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["message"], "config rendered");
+
+    let after_count = installed_package_names(&prefix).len();
+    assert_eq!(before_count, after_count);
+    let history_after =
+        fs::read_to_string(prefix.join("conda-meta").join("history")).expect("read history");
+    assert_eq!(history_before, history_after);
+}
+
+#[test]
+fn remove_print_config_only_renders_target_prefix_and_specs() {
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("env");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "xtensor-python",
+            "xtl",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["message"], "config rendered");
+    assert_eq!(body["data"]["operation"], "remove");
+    assert_eq!(body["data"]["target_prefix"], prefix.display().to_string());
+    assert_eq!(
+        body["data"]["specs"],
+        serde_json::json!(["xtensor-python", "xtl"])
+    );
+}
+
+#[test]
 fn remove_default_prune_keeps_explicitly_requested_dependency() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
@@ -2061,6 +2149,123 @@ fn create_accepts_conda_lockfile_input() {
 }
 
 #[test]
+fn create_accepts_mambajs_lockfile_input() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let subdir = current_platform_subdir();
+    let source = mamba_lockfile_fixture(&format!("test-env-lock-{subdir}.json"));
+    let lockfile = tmp.path().join("test-env-lock.json");
+    fs::copy(source, &lockfile).expect("copy mambajs lockfile");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            lockfile.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "zlib"));
+}
+
+#[test]
+fn create_lockfile_filters_non_current_platform_packages() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let source = mamba_lockfile_fixture("test-env-lock.yaml");
+    let lockfile = tmp.path().join("test-env-lock.yaml");
+    fs::copy(source, &lockfile).expect("copy lockfile");
+    let current = current_platform_subdir();
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            lockfile.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let records = load_installed_records(&prefix);
+    for record in records
+        .iter()
+        .filter(|record| record["source"] == "conda")
+        .filter_map(|record| record["platform"].as_str())
+    {
+        assert!(
+            record == current || record == "noarch",
+            "unexpected platform record: {record} != {current}"
+        );
+    }
+}
+
+#[test]
+fn create_lockfile_with_pip_installs_pip_records() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let lockfile = tmp.path().join("pip-lock.json");
+    fs::write(
+        &lockfile,
+        r#"
+{
+  "lockVersion": "1.0.1",
+  "platform": "linux-64",
+  "channels": ["conda-forge"],
+  "packages": {},
+  "pipPackages": {
+    "starlette-0.17.1-py3-none-any.whl": {
+      "name": "starlette",
+      "version": "0.17.1",
+      "url": "https://files.pythonhosted.org/packages/starlette-0.17.1-py3-none-any.whl",
+      "registry": "PyPi"
+    }
+  }
+}
+"#,
+    )
+    .expect("write pip lock");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            lockfile.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let records = load_installed_records(&prefix);
+    assert!(
+        records
+            .iter()
+            .any(|record| record["name"] == "starlette" && record["source"] == "pip")
+    );
+}
+
+#[test]
 fn create_multiple_env_files_keep_first_name_and_warn() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
@@ -2943,6 +3148,12 @@ fn current_platform_subdir() -> String {
         ("windows", "x86_64") => "win-64".to_string(),
         _ => format!("{os}-{arch}"),
     }
+}
+
+fn mamba_lockfile_fixture(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../mamba/micromamba/tests/env_lockfiles")
+        .join(name)
 }
 
 #[derive(Clone)]
