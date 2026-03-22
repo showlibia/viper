@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 
 use crate::error::CoreError;
-use crate::spec::package_name_from_spec;
+use crate::spec::{package_name_from_spec, parse_explicit_url};
 use crate::transaction::{PlannedLink, PlannedUnlink};
 use crate::types::PackageRecord;
 
@@ -362,14 +362,14 @@ impl EnvironmentState {
             match action.trim() {
                 "create" | "install" | "update" => {
                     for spec in specs {
-                        if let Ok(name) = package_name_from_spec(&spec) {
+                        if let Some(name) = requested_name_from_history_spec(&spec) {
                             requested.insert(name, spec);
                         }
                     }
                 }
                 "remove" | "uninstall" => {
                     for spec in specs {
-                        if let Ok(name) = package_name_from_spec(&spec) {
+                        if let Some(name) = requested_name_from_history_spec(&spec) {
                             requested.remove(&name);
                         }
                     }
@@ -524,6 +524,13 @@ impl EnvironmentState {
 
         Ok(revisions)
     }
+}
+
+fn requested_name_from_history_spec(spec: &str) -> Option<String> {
+    if let Ok(info) = parse_explicit_url(spec) {
+        return Some(info.name);
+    }
+    package_name_from_spec(spec).ok()
 }
 
 fn package_record_filename(record: &PackageRecord) -> String {

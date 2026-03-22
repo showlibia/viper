@@ -221,6 +221,7 @@ mod tests {
             offline: false,
             repodata_ttl: None,
             verbose: 0,
+            print_config_only: false,
         };
         let cfg = build_config(
             ConfigInput { globals },

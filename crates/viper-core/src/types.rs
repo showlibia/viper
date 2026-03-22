@@ -16,6 +16,7 @@ pub struct CliGlobalOptions {
     pub offline: bool,
     pub repodata_ttl: Option<usize>,
     pub verbose: u8,
+    pub print_config_only: bool,
 }
 
 #[derive(Debug, Clone)]

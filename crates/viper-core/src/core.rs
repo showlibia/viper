@@ -8,7 +8,9 @@ use crate::config::{ConfigInput, ConfigStore, build_config};
 use crate::error::CoreError;
 use crate::repodata::{RepoPackage, fetch_packages};
 use crate::solver::{SolveOptions, solve_to_actions, spec_requires_full_repodata};
-use crate::spec::{SpecFileKind, normalize_spec, parse_match_spec, parse_spec_file};
+use crate::spec::{
+    SpecFileKind, normalize_spec, parse_explicit_url, parse_match_spec, parse_spec_file,
+};
 use crate::state::{EnvironmentState, is_managed_prefix};
 use crate::transaction::{PlannedLink, TransactionExecutor, TransactionPlan};
 use crate::types::{
@@ -52,6 +54,19 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 normalized.yaml_name.as_deref(),
                 normalized.yaml_file_stem.as_deref(),
             )?;
+            if globals.print_config_only {
+                let mut result = OperationResult::ok(
+                    "config rendered",
+                    render_normalized_request_view(
+                        "create",
+                        &target_prefix,
+                        &normalized,
+                        config.dry_run,
+                    ),
+                );
+                result.warnings = normalized.warnings;
+                return Ok(result);
+            }
             let (conda_link_actions, solver_trace) = if normalized.explicit_mode {
                 (
                     explicit_specs_to_links(&normalized.explicit_specs)?,
@@ -141,6 +156,26 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 .target_prefix
                 .clone()
                 .ok_or(CoreError::MissingTargetPrefix)?;
+            let normalized = normalize_request_inputs(
+                specs,
+                files,
+                &config.channels,
+                &globals.channels,
+                globals.name.as_deref(),
+            )?;
+            if globals.print_config_only {
+                let mut result = OperationResult::ok(
+                    "config rendered",
+                    render_normalized_request_view(
+                        "install",
+                        &target_prefix,
+                        &normalized,
+                        config.dry_run,
+                    ),
+                );
+                result.warnings = normalized.warnings;
+                return Ok(result);
+            }
             if !target_prefix.exists() {
                 return Err(CoreError::PrefixNotFound(
                     target_prefix.display().to_string(),
@@ -151,14 +186,6 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     target_prefix.display().to_string(),
                 ));
             }
-
-            let normalized = normalize_request_inputs(
-                specs,
-                files,
-                &config.channels,
-                &globals.channels,
-                globals.name.as_deref(),
-            )?;
             let state = EnvironmentState::load(&target_prefix)?;
             let (conda_link_actions, solver_trace) = if normalized.explicit_mode {
                 (
@@ -199,7 +226,11 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     .map_err(CoreError::UnsatisfiedSpecs)?;
                 (solved.actions, Some(solved.trace))
             };
-            let conda_plan = TransactionPlan::from_solved(&state.packages, &conda_link_actions);
+            let conda_plan = if normalized.explicit_mode {
+                transaction_plan_for_explicit_install(&state.packages, &conda_link_actions)
+            } else {
+                TransactionPlan::from_solved(&state.packages, &conda_link_actions)
+            };
             let platform = current_platform_subdir();
             let mut link_actions = conda_plan.link.clone();
             link_actions.extend(normalized.pip_specs.iter().map(|spec| {
@@ -510,7 +541,7 @@ fn normalize_request_inputs(
             file_kind_is_yaml = Some(is_yaml);
         }
 
-        if parsed.kind == SpecFileKind::Explicit {
+        if matches!(parsed.kind, SpecFileKind::Explicit | SpecFileKind::Lock) {
             explicit_mode = true;
             explicit_specs = parsed.env.conda_specs;
             conda_specs.clear();
@@ -589,63 +620,108 @@ fn explicit_specs_to_links(specs: &[String]) -> Result<Vec<PlannedLink>, CoreErr
 }
 
 fn explicit_spec_to_link(spec: &str) -> Result<PlannedLink, CoreError> {
-    let normalized = normalize_spec(spec)?;
-    if !normalized.starts_with("http://") && !normalized.starts_with("https://") {
-        return Err(CoreError::InvalidEnvironmentFile(format!(
-            "explicit entry must be a URL: {normalized}"
-        )));
-    }
-    let (url_no_fragment, fragment) = normalized.split_once('#').unwrap_or((&normalized, ""));
-    let filename = url_no_fragment.rsplit('/').next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {normalized}"))
-    })?;
-    let dist = filename
-        .strip_suffix(".tar.bz2")
-        .or_else(|| filename.strip_suffix(".conda"))
-        .ok_or_else(|| {
-            CoreError::InvalidEnvironmentFile(format!(
-                "explicit entry must end with .tar.bz2 or .conda: {filename}"
-            ))
-        })?;
-    let mut parts = dist.rsplitn(3, '-');
-    let build = parts.next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry missing build: {filename}"))
-    })?;
-    let version = parts.next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry missing version: {filename}"))
-    })?;
-    let name = parts.next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry missing name: {filename}"))
-    })?;
-    let (prefix, _) = url_no_fragment.rsplit_once('/').ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {normalized}"))
-    })?;
-    let (base_url, subdir) = prefix.rsplit_once('/').ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {normalized}"))
-    })?;
-
-    let (md5, sha256) = if fragment.len() == 32 {
-        (Some(fragment.to_string()), None)
-    } else if fragment.len() == 64 {
-        (None, Some(fragment.to_string()))
+    let info = parse_explicit_url(spec)?;
+    let (md5, sha256) = if info.fragment.as_ref().is_some_and(|hash| hash.len() == 32) {
+        (info.fragment.clone(), None)
+    } else if info.fragment.as_ref().is_some_and(|hash| hash.len() == 64) {
+        (None, info.fragment.clone())
     } else {
         (None, None)
     };
 
     Ok(PlannedLink {
-        name: name.to_string(),
-        version: version.to_string(),
-        build: build.to_string(),
+        name: info.name,
+        version: info.version,
+        build: info.build,
         build_number: 0,
-        dist_name: dist.to_string(),
-        channel: base_url.to_string(),
-        base_url: base_url.to_string(),
-        url: url_no_fragment.to_string(),
+        dist_name: info.dist,
+        channel: info.base_url.clone(),
+        base_url: info.base_url,
+        url: info.url_no_fragment,
         md5,
         sha256,
         depends: Vec::new(),
-        platform: subdir.to_string(),
+        platform: info.subdir,
         source: "conda".to_string(),
+    })
+}
+
+fn transaction_plan_for_explicit_install(
+    installed: &[PackageRecord],
+    explicit_links: &[PlannedLink],
+) -> TransactionPlan {
+    let target_names = explicit_links
+        .iter()
+        .map(|link| link.name.clone())
+        .collect::<HashSet<_>>();
+
+    let mut unlink = Vec::new();
+    for installed_pkg in installed.iter().filter(|pkg| pkg.source == "conda") {
+        if !target_names.contains(&installed_pkg.name) {
+            continue;
+        }
+        let keep_same = explicit_links.iter().any(|link| {
+            link.name == installed_pkg.name
+                && link.version == installed_pkg.version
+                && link.build == installed_pkg.build_string
+        });
+        if !keep_same {
+            unlink.push(crate::transaction::PlannedUnlink {
+                name: installed_pkg.name.clone(),
+                version: installed_pkg.version.clone(),
+                build: installed_pkg.build_string.clone(),
+                dist_name: if installed_pkg.dist_name.is_empty() {
+                    format!(
+                        "{}-{}-{}",
+                        installed_pkg.name, installed_pkg.version, installed_pkg.build_string
+                    )
+                } else {
+                    installed_pkg.dist_name.clone()
+                },
+                source: installed_pkg.source.clone(),
+            });
+        }
+    }
+
+    let mut link = Vec::new();
+    for solved_pkg in explicit_links {
+        let same = installed
+            .iter()
+            .filter(|pkg| pkg.source == "conda")
+            .find(|pkg| pkg.name == solved_pkg.name)
+            .is_some_and(|installed_pkg| {
+                installed_pkg.version == solved_pkg.version
+                    && installed_pkg.build_string == solved_pkg.build
+            });
+        if !same {
+            link.push(solved_pkg.clone());
+        }
+    }
+
+    TransactionPlan {
+        fetch: link.clone(),
+        extract: link.clone(),
+        link,
+        unlink,
+    }
+}
+
+fn render_normalized_request_view(
+    operation: &str,
+    target_prefix: &std::path::Path,
+    normalized: &NormalizedRequestInputs,
+    dry_run: bool,
+) -> serde_json::Value {
+    json!({
+        "operation": operation,
+        "target_prefix": target_prefix,
+        "dry_run": dry_run,
+        "explicit_mode": normalized.explicit_mode,
+        "specs": if normalized.explicit_mode { normalized.explicit_specs.clone() } else { normalized.conda_specs.clone() },
+        "pip_specs": normalized.pip_specs,
+        "channels": normalized.channels,
+        "yaml_name": normalized.yaml_name,
+        "yaml_file_stem": normalized.yaml_file_stem,
     })
 }
 

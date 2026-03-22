@@ -47,6 +47,9 @@ struct Cli {
     #[arg(short = 'v', action = ArgAction::Count, global = true)]
     verbose: u8,
 
+    #[arg(long = "print-config-only", global = true)]
+    print_config_only: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -153,6 +156,7 @@ fn run() -> Result<()> {
         offline: cli.offline,
         repodata_ttl: cli.repodata_ttl,
         verbose: cli.verbose,
+        print_config_only: cli.print_config_only,
     };
 
     let op = match cli.command {
