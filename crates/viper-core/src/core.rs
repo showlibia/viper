@@ -5,7 +5,7 @@ use serde_json::json;
 use crate::config::{ConfigInput, ConfigStore, build_config};
 use crate::error::CoreError;
 use crate::repodata::fetch_packages;
-use crate::solver::{solve_to_actions, spec_requires_full_repodata};
+use crate::solver::{SolveOptions, solve_to_actions, spec_requires_full_repodata};
 use crate::spec::parse_env_file;
 use crate::state::{EnvironmentState, ensure_prefix_layout, is_managed_prefix};
 use crate::types::{
@@ -60,12 +60,13 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     repodata_filename,
                 )?
             };
-            let mut link_actions = solve_to_actions(&normalized.conda_specs, &repodata);
-            if has_unresolved_conda_actions(&link_actions) {
-                return Err(CoreError::UnsatisfiedSpecs(unresolved_action_names(
-                    &link_actions,
-                )));
-            }
+            let solve_options = SolveOptions {
+                channels: normalized.channels.clone(),
+                strict_channel_priority: config.channel_priority == "strict",
+            };
+            let solved = solve_to_actions(&normalized.conda_specs, &repodata, &solve_options)
+                .map_err(CoreError::UnsatisfiedSpecs)?;
+            let mut link_actions = solved.actions;
             link_actions.extend(normalized.pip_specs.iter().map(|spec| {
                 crate::transaction::PlannedLink {
                     name: crate::spec::package_name_from_spec(spec)
@@ -98,6 +99,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "actions": {
                         "link": link_actions,
                     },
+                    "solver_trace": if config.verbose >= 3 { Some(solved.trace) } else { None },
                     "dry_run": config.dry_run,
                 }),
             );
@@ -140,12 +142,13 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     repodata_filename,
                 )?
             };
-            let mut link_actions = solve_to_actions(&normalized.conda_specs, &repodata);
-            if has_unresolved_conda_actions(&link_actions) {
-                return Err(CoreError::UnsatisfiedSpecs(unresolved_action_names(
-                    &link_actions,
-                )));
-            }
+            let solve_options = SolveOptions {
+                channels: normalized.channels.clone(),
+                strict_channel_priority: config.channel_priority == "strict",
+            };
+            let solved = solve_to_actions(&normalized.conda_specs, &repodata, &solve_options)
+                .map_err(CoreError::UnsatisfiedSpecs)?;
+            let mut link_actions = solved.actions;
             link_actions.extend(normalized.pip_specs.iter().map(|spec| {
                 crate::transaction::PlannedLink {
                     name: crate::spec::package_name_from_spec(spec)
@@ -176,6 +179,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "actions": {
                         "link": link_actions,
                     },
+                    "solver_trace": if config.verbose >= 3 { Some(solved.trace) } else { None },
                     "dry_run": config.dry_run,
                 }),
             );
@@ -484,25 +488,6 @@ fn select_repodata_filename(specs: &[String]) -> &'static str {
     } else {
         "current_repodata.json"
     }
-}
-
-fn has_unresolved_conda_actions(actions: &[crate::transaction::PlannedLink]) -> bool {
-    actions
-        .iter()
-        .any(|a| a.source == "conda" && a.channel == "unresolved")
-}
-
-fn unresolved_action_names(actions: &[crate::transaction::PlannedLink]) -> Vec<String> {
-    let mut names = Vec::new();
-    for action in actions
-        .iter()
-        .filter(|a| a.source == "conda" && a.channel == "unresolved")
-    {
-        if !names.iter().any(|n| n == &action.name) {
-            names.push(action.name.clone());
-        }
-    }
-    names
 }
 
 fn render_list_output(

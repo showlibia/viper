@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
 
 use rattler_conda_types::{
@@ -9,35 +10,113 @@ use crate::repodata::RepoPackage;
 use crate::spec::package_name_from_spec;
 use crate::transaction::PlannedLink;
 
-pub fn solve_to_actions(specs: &[String], packages: &[RepoPackage]) -> Vec<PlannedLink> {
-    let mut actions = Vec::new();
-    for spec in specs {
-        let parsed = spec.parse::<MatchSpec>().ok();
-        let name = requested_name(spec, parsed.as_ref());
-        if let Some(best) = pick_best_candidate(&name, parsed.as_ref(), packages) {
-            actions.push(PlannedLink {
-                name: best.name.clone(),
-                version: best.version.clone(),
-                build: best.build.clone(),
-                channel: best.channel.clone(),
-                url: best.url.clone(),
-                source: "conda".to_string(),
-            });
+#[derive(Debug, Clone)]
+pub struct SolveOptions {
+    pub channels: Vec<String>,
+    pub strict_channel_priority: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SolveResult {
+    pub actions: Vec<PlannedLink>,
+    pub trace: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSpec {
+    raw: String,
+    required_by: Option<String>,
+}
+
+pub fn solve_to_actions(
+    specs: &[String],
+    packages: &[RepoPackage],
+    options: &SolveOptions,
+) -> Result<SolveResult, Vec<String>> {
+    let channel_priority = build_channel_priority_map(&options.channels);
+    let mut selected: BTreeMap<String, &RepoPackage> = BTreeMap::new();
+    let mut trace = Vec::new();
+    let mut conflicts = Vec::new();
+    let mut pending = specs
+        .iter()
+        .map(|raw| PendingSpec {
+            raw: raw.clone(),
+            required_by: None,
+        })
+        .collect::<Vec<_>>();
+
+    while let Some(next) = pending.pop() {
+        let parsed = next.raw.parse::<MatchSpec>().ok();
+        let name = requested_name(&next.raw, parsed.as_ref());
+
+        if let Some(existing) = selected.get(&name) {
+            if candidate_matches_spec(parsed.as_ref(), existing) {
+                continue;
+            }
+
+            let requester = next.required_by.as_deref().unwrap_or("user-requested spec");
+            conflicts.push(format!(
+                "conflict: {requester} requires '{}' but selected {}={}",
+                next.raw, existing.name, existing.version
+            ));
             continue;
         }
 
-        actions.push(PlannedLink {
-            name,
-            version: parsed
-                .and_then(|ms| ms.version.map(|v| v.to_string()))
-                .unwrap_or_else(|| "unknown".to_string()),
-            build: "unknown".to_string(),
-            channel: "unresolved".to_string(),
-            url: String::new(),
-            source: "conda".to_string(),
-        });
+        let Some(chosen) = pick_best_candidate(
+            &name,
+            parsed.as_ref(),
+            packages,
+            options.strict_channel_priority,
+            &channel_priority,
+        ) else {
+            let requester = next.required_by.as_deref().unwrap_or("user-requested spec");
+            conflicts.push(format!(
+                "unsatisfied: {requester} requires '{}' (package '{name}')",
+                next.raw
+            ));
+            continue;
+        };
+
+        trace.push(format!(
+            "selected {}={} build={} channel={} for spec '{}'",
+            chosen.name, chosen.version, chosen.build, chosen.channel, next.raw
+        ));
+        selected.insert(name.clone(), chosen);
+
+        for dep in chosen.depends.iter().rev() {
+            let dep_name = package_name_from_spec(dep).unwrap_or_else(|_| dep.clone());
+            if selected.contains_key(&dep_name) {
+                continue;
+            }
+            pending.push(PendingSpec {
+                raw: dep.clone(),
+                required_by: Some(format!("{}={}", chosen.name, chosen.version)),
+            });
+        }
     }
-    actions
+
+    if !conflicts.is_empty() {
+        let mut seen = HashSet::new();
+        let deduped = conflicts
+            .into_iter()
+            .filter(|line| seen.insert(line.clone()))
+            .collect::<Vec<_>>();
+        return Err(deduped);
+    }
+
+    let actions = selected
+        .into_values()
+        .map(|best| PlannedLink {
+            name: best.name.clone(),
+            version: best.version.clone(),
+            build: best.build.clone(),
+            channel: best.channel.clone(),
+            url: best.url.clone(),
+            source: "conda".to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    Ok(SolveResult { actions, trace })
 }
 
 fn requested_name(spec: &str, parsed: Option<&MatchSpec>) -> String {
@@ -84,12 +163,71 @@ fn pick_best_candidate<'a>(
     name: &str,
     spec: Option<&MatchSpec>,
     packages: &'a [RepoPackage],
+    strict_channel_priority: bool,
+    channel_priority: &HashMap<String, usize>,
 ) -> Option<&'a RepoPackage> {
-    packages
+    let filtered = packages
         .iter()
         .filter(|p| p.name == name)
         .filter(|p| candidate_matches_spec(spec, p))
-        .max_by(|a, b| compare_candidates(a, b))
+        .collect::<Vec<_>>();
+
+    if filtered.is_empty() {
+        return None;
+    }
+
+    let candidates = if strict_channel_priority {
+        let top_rank = filtered
+            .iter()
+            .map(|candidate| channel_rank(channel_priority, candidate.channel.as_str()))
+            .min()
+            .unwrap_or(usize::MAX);
+        filtered
+            .into_iter()
+            .filter(|candidate| {
+                channel_rank(channel_priority, candidate.channel.as_str()) == top_rank
+            })
+            .collect::<Vec<_>>()
+    } else {
+        filtered
+    };
+
+    candidates.into_iter().max_by(|a, b| {
+        compare_candidates(a, b).then_with(|| compare_channel_rank(a, b, channel_priority))
+    })
+}
+
+fn compare_channel_rank(
+    a: &RepoPackage,
+    b: &RepoPackage,
+    channel_priority: &HashMap<String, usize>,
+) -> std::cmp::Ordering {
+    let ar = channel_rank(channel_priority, a.channel.as_str());
+    let br = channel_rank(channel_priority, b.channel.as_str());
+    br.cmp(&ar)
+}
+
+fn channel_rank(channel_priority: &HashMap<String, usize>, channel: &str) -> usize {
+    channel_priority
+        .get(&normalize_channel(channel))
+        .copied()
+        .unwrap_or(usize::MAX)
+}
+
+fn build_channel_priority_map(channels: &[String]) -> HashMap<String, usize> {
+    let mut out = HashMap::new();
+    for (idx, channel) in channels.iter().enumerate() {
+        out.entry(normalize_channel(channel)).or_insert(idx);
+    }
+    out
+}
+
+fn normalize_channel(channel: &str) -> String {
+    let trimmed = channel.trim_end_matches('/');
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    format!("https://conda.anaconda.org/{trimmed}")
 }
 
 fn candidate_matches_spec(spec: Option<&MatchSpec>, candidate: &RepoPackage) -> bool {
@@ -137,12 +275,16 @@ fn candidate_subdir(url: &str) -> Option<&str> {
 
 fn compare_candidates(a: &RepoPackage, b: &RepoPackage) -> std::cmp::Ordering {
     match (Version::from_str(&a.version), Version::from_str(&b.version)) {
-        (Ok(av), Ok(bv)) => av.cmp(&bv).then_with(|| a.build.cmp(&b.build)),
+        (Ok(av), Ok(bv)) => av
+            .cmp(&bv)
+            .then_with(|| a.build_number.cmp(&b.build_number))
+            .then_with(|| a.build.cmp(&b.build)),
         (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
         (Err(_), Ok(_)) => std::cmp::Ordering::Less,
         (Err(_), Err(_)) => a
             .version
             .cmp(&b.version)
+            .then_with(|| a.build_number.cmp(&b.build_number))
             .then_with(|| a.build.cmp(&b.build)),
     }
 }
@@ -169,6 +311,13 @@ mod tests {
         }
     }
 
+    fn options(channels: &[&str], strict_channel_priority: bool) -> SolveOptions {
+        SolveOptions {
+            channels: channels.iter().map(ToString::to_string).collect(),
+            strict_channel_priority,
+        }
+    }
+
     #[test]
     fn constrained_spec_filters_candidates() {
         let pkgs = vec![
@@ -187,8 +336,18 @@ mod tests {
                 "linux-64",
             ),
         ];
-        let actions = solve_to_actions(&["python<3.10".to_string()], &pkgs);
-        assert_eq!(actions[0].version, "3.9.19");
+        let result = solve_to_actions(
+            &["python<3.10".to_string()],
+            &pkgs,
+            &options(&["conda-forge"], false),
+        )
+        .expect("solver must resolve");
+        let python = result
+            .actions
+            .iter()
+            .find(|action| action.name == "python")
+            .expect("python action");
+        assert_eq!(python.version, "3.9.19");
     }
 
     #[test]
@@ -209,8 +368,18 @@ mod tests {
                 "linux-64",
             ),
         ];
-        let actions = solve_to_actions(&["python".to_string()], &pkgs);
-        assert_eq!(actions[0].version, "3.11");
+        let result = solve_to_actions(
+            &["python".to_string()],
+            &pkgs,
+            &options(&["conda-forge"], false),
+        )
+        .expect("solver must resolve");
+        let python = result
+            .actions
+            .iter()
+            .find(|action| action.name == "python")
+            .expect("python action");
+        assert_eq!(python.version, "3.11");
     }
 
     #[test]
@@ -231,12 +400,113 @@ mod tests {
                 "linux-64",
             ),
         ];
-        let actions = solve_to_actions(
+        let result = solve_to_actions(
             &["conda-forge::numpy[build=\"py311_*\"]".to_string()],
             &pkgs,
+            &options(&["conda-forge", "bioconda"], false),
+        )
+        .expect("solver must resolve");
+        let numpy = result
+            .actions
+            .iter()
+            .find(|action| action.name == "numpy")
+            .expect("numpy action");
+        assert_eq!(numpy.channel, "https://conda.anaconda.org/conda-forge");
+        assert_eq!(numpy.build, "py311_0");
+    }
+
+    #[test]
+    fn resolves_transitive_dependencies() {
+        let mut python = pkg(
+            "python",
+            "3.11.9",
+            "h123",
+            "https://conda.anaconda.org/conda-forge",
+            "linux-64",
         );
-        assert_eq!(actions[0].channel, "https://conda.anaconda.org/conda-forge");
-        assert_eq!(actions[0].build, "py311_0");
+        python.depends = vec!["openssl >=3.2,<4.0a0".to_string()];
+
+        let openssl = pkg(
+            "openssl",
+            "3.2.2",
+            "h456",
+            "https://conda.anaconda.org/conda-forge",
+            "linux-64",
+        );
+
+        let result = solve_to_actions(
+            &["python".to_string()],
+            &[python, openssl],
+            &options(&["conda-forge"], false),
+        )
+        .expect("solver must resolve closure");
+
+        assert!(result.actions.iter().any(|action| action.name == "python"));
+        assert!(result.actions.iter().any(|action| action.name == "openssl"));
+        assert!(!result.trace.is_empty());
+    }
+
+    #[test]
+    fn strict_channel_priority_prefers_higher_priority_channel() {
+        let pkgs = vec![
+            pkg(
+                "zlib",
+                "1.2.13",
+                "h1",
+                "https://conda.anaconda.org/conda-forge",
+                "linux-64",
+            ),
+            pkg(
+                "zlib",
+                "1.3.1",
+                "h2",
+                "https://conda.anaconda.org/defaults",
+                "linux-64",
+            ),
+        ];
+
+        let result = solve_to_actions(
+            &["zlib".to_string()],
+            &pkgs,
+            &options(&["conda-forge", "defaults"], true),
+        )
+        .expect("solver must resolve");
+
+        let zlib = result
+            .actions
+            .iter()
+            .find(|action| action.name == "zlib")
+            .expect("zlib action");
+        assert_eq!(zlib.channel, "https://conda.anaconda.org/conda-forge");
+    }
+
+    #[test]
+    fn reports_conflicts_for_unsatisfied_dependencies() {
+        let mut python = pkg(
+            "python",
+            "3.11.9",
+            "h123",
+            "https://conda.anaconda.org/conda-forge",
+            "linux-64",
+        );
+        python.depends = vec!["openssl >=3.2,<4.0a0".to_string()];
+        let openssl = pkg(
+            "openssl",
+            "1.1.1",
+            "h456",
+            "https://conda.anaconda.org/conda-forge",
+            "linux-64",
+        );
+
+        let err = solve_to_actions(
+            &["python".to_string()],
+            &[python, openssl],
+            &options(&["conda-forge"], false),
+        )
+        .expect_err("solver must report conflict");
+
+        assert!(err.iter().any(|line| line.contains("unsatisfied")));
+        assert!(err.iter().any(|line| line.contains("openssl")));
     }
 
     #[test]
