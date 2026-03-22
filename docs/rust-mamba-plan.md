@@ -1,147 +1,270 @@
-# Viper：Rust 重写 mamba 的实施计划
+# Viper：基于 Mamba 源码的分阶段详细实施计划
 
-## 目标说明
-在 `viper` 工作区内分阶段实现一个 conda 兼容的虚拟环境管理器，核心行为以 `mamba/` 源码与测试为基准。首阶段完成 `create/install/remove/list/info/config` 的可用兼容，随后补齐 SAT 依赖求解、事务执行与回滚、索引缓存一致性和 CLI/JSON 输出稳定性。
+## Goal Description
+在 `viper` 工作区内分阶段实现一个以 `mamba/micromamba` 源码和测试为基准的 conda 兼容环境管理器。目标不是“功能大致可用”，而是将 `create/install/remove/list/info/config` 的请求归一化、spec 来源处理、索引缓存、环境级求解、事务执行、历史记录与 CLI/JSON 输出逐步收敛到可对照、可回归、可验证的行为基线。
 
-## 验收标准
+本计划按 `mamba` 的真实控制流拆解：
+- CLI 入口与配置装载：`mamba/micromamba/src/main.cpp`、`create.cpp`、`install.cpp`、`remove.cpp`
+- API 编排与 file-spec 处理：`mamba/libmamba/src/api/install.cpp`、`create.cpp`、`remove.cpp`
+- 索引与缓存：`mamba/libmamba/src/core/subdir_index.cpp`
+- 前缀状态与历史：`mamba/libmamba/src/core/prefix_data.cpp`
+- 求解与事务：`mamba/libmamba/src/solver/helpers.cpp`、`mamba/libmamba/src/core/transaction.cpp`
 
-遵循 TDD 思路，每条标准都包含正向与反向测试，确保可确定性验证。
+## Acceptance Criteria
 
-- AC-1: CLI 命令与全局参数兼容基线落地（create/install/remove/list/info/config）
-  - 正向测试（预期 PASS）：
-    - `viper create -n t -c conda-forge python=3.11 --json` 能解析并返回结构化结果。
-    - `viper install -p <prefix> numpy --dry-run` 仅返回事务计划，不写入前缀。
-  - 反向测试（预期 FAIL）：
-    - 目标前缀缺失时执行 `install/remove/list` 返回明确错误。
-    - 非受管前缀（缺少 `conda-meta`）执行写操作被拒绝并给出错误码/错误信息。
+- AC-1: CLI 命令入口、前缀选择与全局参数行为与 `mamba` 基线对齐
+  - Positive Tests (expected to PASS):
+    - `viper create -n t python --json`、`viper install -p <prefix> numpy --json`、`viper remove -p <prefix> xtensor --json` 返回稳定结构化结果。
+    - `--name`、`--prefix`、`CONDA_PREFIX`、`MAMBA_TARGET_PREFIX`、env-file `name` 的优先级与 `mamba/micromamba/tests/test_install.py` 的目标前缀矩阵一致。
+    - `config list/get/set`、`info --json` 输出包含高频字段且语义稳定。
+  - Negative Tests (expected to FAIL):
+    - 同时传 `--name` 与 `--prefix` 必须失败。
+    - 缺失目标前缀时 `install/remove/list` 必须失败。
+    - 非受管前缀执行写操作必须失败。
 
-- AC-2: repodata 获取、缓存与离线语义与 mamba 关键行为对齐
-  - 正向测试（预期 PASS）：
-    - 在线模式首次请求写入 `<cache>.json` 与 `<cache>.state.json`，后续命中 TTL。
-    - 命中 ETag/Last-Modified 返回 304 时复用本地缓存并刷新元数据时间戳。
-  - 反向测试（预期 FAIL）：
-    - `--offline` 且缓存不存在时返回 `OfflineRepodataUnavailable`。
-    - 远端失败且本地缓存不存在时返回网络错误，不得伪造成功结果。
+- AC-2: spec 输入源与请求归一化行为与 `mamba` 对齐
+  - Positive Tests (expected to PASS):
+    - CLI specs、YAML env file、classic spec file、explicit file、lockfile 均能按各自语义解析并归一化。
+    - multiple `-f` 行为符合 `mamba/libmamba/src/api/install.cpp` 的 `file_specs_hook`：区分 `yaml` 与 `other`，explicit 模式保留 URL specs。
+    - env-file 中 `name/channels/dependencies/pip` 与 CLI specs 可按顺序合并。
+    - 显式文件支持 `@EXPLICIT`、URL fragment hash、`# platform:` 注释。
+  - Negative Tests (expected to FAIL):
+    - 空 spec、非法 MatchSpec、空非 YAML spec file 必须明确失败。
+    - YAML 与 non-YAML file spec 混用必须失败。
+    - 非 `.yml/.yaml` 的 env-file 不能误走 YAML 语义。
+  - AC-2.1: 兼容 file-spec 扩展路径
+    - Positive:
+      - `create/install -f classic.txt`、`-f explicit.txt`、`-f env.yaml` 的 `--print-config-only` 行为与上游测试一致。
+      - explicit file 在 create/install 里走 explicit 请求路径，而不是 MatchSpec 求解路径。
+    - Negative:
+      - 不能把 explicit URL silently 降级为 `name=version=build` 后继续常规求解。
 
-- AC-3: 依赖求解从“单包优选”升级为“环境级闭包求解”
-  - 正向测试（预期 PASS）：
-    - 给定多 spec（如 `python numpy`）能求出一致可安装集合，包含传递依赖。
-    - 开启 strict channel priority 时，候选过滤遵循高优先级 channel 优先。
-  - 反向测试（预期 FAIL）：
-    - 不可满足约束（冲突版本）返回可解释的冲突报告，而不是 `unknown` 占位结果。
-    - 禁止回退到“只挑最高版本”导致的伪可解结果。
-  - AC-3.1: 求解策略可追踪并可回归
-    - 正向：`-vvv` 或等效调试输出包含候选筛选与最终决策摘要。
-    - 反向：无法复现实验条件（channel/spec/平台）时测试应失败。
+- AC-3: repodata 获取、缓存、条件请求与离线语义可对照 `subdir_index`
+  - Positive Tests (expected to PASS):
+    - 首次在线请求写入缓存 JSON 与 state 元数据。
+    - TTL 新鲜时直接命中本地缓存，不发网络请求。
+    - 命中 `304 Not Modified` 时复用本地 repodata 并刷新元数据时间戳。
+    - `current_repodata.json` 与 `repodata.json` 使用不同缓存键，互不污染。
+  - Negative Tests (expected to FAIL):
+    - `--offline` 且无缓存时必须返回明确错误。
+    - 远端失败且无缓存时必须返回网络错误。
+    - state 元数据与缓存文件不一致时不能伪装为命中。
+  - AC-3.1: 索引选择策略稳定
+    - Positive:
+      - 宽松 spec 优先使用 `current_repodata.json`。
+      - 受限 spec、build/channel/subdir/hash 约束自动切换到 `repodata.json`。
+    - Negative:
+      - 不能因为错误的 repodata 选择导致候选缺失但仍报告成功。
 
-- AC-4: 事务执行与前缀状态管理具备原子性与可恢复性
-  - 正向测试（预期 PASS）：
-    - 成功安装后写入稳定状态（`conda-meta` 元数据与历史记录），`list` 可读。
-    - `remove` 只删除目标包并保留环境其余状态一致性。
-  - 反向测试（预期 FAIL）：
-    - 解包/链接阶段故障时触发回滚，禁止留下半安装状态。
-    - `--dry-run` 下出现任何文件系统写入视为失败。
+- AC-4: 前缀状态、历史记录与 installed package 视图稳定
+  - Positive Tests (expected to PASS):
+    - `conda-meta/*.json` 与 history 记录可被稳定加载并用于 `list`、`remove`、后续 `install`。
+    - requested specs map 与历史记录可驱动 keep-user-spec 行为。
+    - revisions 视图能够从 history 中恢复 install/remove 差异。
+  - Negative Tests (expected to FAIL):
+    - 持久化失败不能留下部分写入状态。
+    - history 与 conda-meta 不一致时不能静默忽略关键错误路径。
 
-- AC-5: 环境文件（YAML）与 pip section 兼容行为可验证
-  - 正向测试（预期 PASS）：
-    - 读取 `name/channels/dependencies/pip` 并合并 CLI specs 形成统一请求。
-    - `create -f env.yaml` 在未显式给 prefix/name 时按文件名推导目标前缀。
-  - 反向测试（预期 FAIL）：
-    - 非 `.yml/.yaml` 文件被拒绝并返回 `UnsupportedEnvironmentFile`。
-    - 空 spec、非法 spec 不得静默忽略。
+- AC-5: 求解从“单包候选排序”升级到“环境级 request/solution 模型”
+  - Positive Tests (expected to PASS):
+    - 多 spec 求解返回一致闭包，包含传递依赖。
+    - strict channel priority、installed set preference、keep user specs 在环境级求解中成立。
+    - remove 默认路径通过 solver request 生成目标状态，而不是仅做本地图裁剪。
+    - 冲突结果可输出稳定、可解释的问题摘要。
+  - Negative Tests (expected to FAIL):
+    - 版本冲突或不可满足约束时不能给出伪可解结果。
+    - remove 默认路径不能绕开 solver 直接删除导致语义漂移。
+  - AC-5.1: 生产求解引擎固定并文档化
+    - Positive:
+      - 明确选定 `resolvo` 或 libsolv 绑定中的一种作为生产路径。
+      - 通过 adapter 层保持 `viper-core` 的外部调用接口稳定。
+    - Negative:
+      - 不允许长期处于“二选一未定”状态。
+      - 不允许测试走自研求解器、生产走另一条未覆盖路径。
 
-- AC-6: 建立 mamba 行为回归映射并持续执行
-  - 正向测试（预期 PASS）：
-    - 从 `mamba/micromamba/tests` 选择高价值用例迁移为 Rust 集成测试。
+- AC-6: 事务计划、执行与回滚具备可验证原子性
+  - Positive Tests (expected to PASS):
+    - transaction plan 明确区分 `fetch/extract/link/unlink`。
+    - `dry-run` 不写入前缀、不写 history、不改 `conda-meta`。
+    - persist/history/link 阶段任意失败时均能回滚到前一稳定前缀状态。
+    - explicit install 路径与 solver install 路径都经过统一事务执行模型。
+  - Negative Tests (expected to FAIL):
+    - 任何失败都不能留下半安装或半删除状态。
+    - 回滚后不能丢失原有 prefix 布局。
+
+- AC-7: `list/info/config` 与 JSON 输出稳定并可快照回归
+  - Positive Tests (expected to PASS):
+    - `list` 支持 regex、`--full-name`、`--no-pip`、`--explicit`、`--md5`、`--sha256`、`--revisions`。
+    - `info --json` 与 `config list/get/set --json` 输出关键字段稳定。
+    - explicit export 输出 URL 与 hash 行为符合上游测试意图。
+  - Negative Tests (expected to FAIL):
+    - 互斥选项组合必须报错。
+    - 缺字段、字段漂移、错误 JSON 结构必须由快照测试拦截。
+
+- AC-8: 建立基于 `mamba` 源码与测试的持续回归体系
+  - Positive Tests (expected to PASS):
+    - 兼容矩阵中的每一行都能链接到上游路径与本地 enforcing test。
     - CI 至少覆盖 `cargo fmt --check`、`cargo clippy -D warnings`、`cargo test --workspace`。
-  - 反向测试（预期 FAIL）：
-    - 若新增行为无测试或与映射基线不一致，合入流程应阻断。
-    - 仅文档声明“兼容”但无可执行测试证据时视为不达标。
+    - 高价值 create/install/remove/list/info/config 用例持续迁移。
+  - Negative Tests (expected to FAIL):
+    - 新增兼容声明如果没有 test + upstream reference，合入流程应阻断。
+    - 兼容矩阵若存在与上游源码/测试不一致的假阳性条目，必须被修正而不是保留。
 
-## 范围边界
+## Path Boundaries
 
-范围边界用于定义实现质量与技术选型的可接受区间。
+### Upper Bound (Maximum Acceptable Scope)
+实现与 micromamba 核心工作流高度一致的 Rust 版本：
+- `create/install/remove/list/info/config` 的核心命令面行为稳定
+- request normalization 覆盖 CLI、YAML、classic、explicit、lockfile
+- `repodata/current_repodata`、offline、TTL、304、cache metadata 行为对齐
+- remove 默认路径与 install/create 一样进入环境级 solver request
+- 事务具备 `fetch/extract/link/unlink` 明确阶段和失败回滚
+- 生产求解引擎固定并完成 adapter 化
+- 兼容矩阵与回归测试持续运行
 
-### 上界（最大可接受范围）
-完成与 micromamba 核心工作流高度一致的 Rust 实现：环境级 SAT 求解、事务回滚、缓存与离线语义、CLI/JSON 输出稳定，并形成可持续的 mamba 对照回归套件。  
-实现覆盖 `create/install/remove/list/info/config` 的高频真实场景，且关键模块具备单元与集成测试。
+### Lower Bound (Minimum Acceptable Scope)
+达到“可用且可验证的 conda MVP”：
+- create/install/remove/list/info/config 基本可用
+- spec 输入与 file-spec 语义不再明显偏离上游
+- repodata 缓存/离线/304 行为可测
+- 默认 remove 不再只是本地图裁剪
+- 事务失败不会损坏前缀
+- 工作区质量门禁全部通过
 
-### 下界（最小可接受范围）
-在当前 `viper` 骨架上达到“可用 MVP”：  
-具备可靠的 repodata 缓存/离线行为、可解释的失败路径、受管前缀状态一致性、基础依赖闭包求解（不再是单包优选），并通过工作区全量质量门禁。
+### Allowed Choices
+- Can use:
+  - `rattler_conda_types` 处理 MatchSpec 与 package metadata
+  - `reqwest`、`serde`、`thiserror`
+  - `resolvo` 或 libsolv 绑定，但必须在计划执行中固定其一并文档化
+  - 先通过 adapter 保持 `viper-core` 接口稳定，再替换内部实现
+- Cannot use:
+  - 以口头约定替代 `mamba/` 源码和测试
+  - 在生产路径使用 `unwrap()`、吞错、无测试改兼容语义
+  - 将 explicit install、remove、dry-run、offline 等关键分支留在特殊旁路却宣称兼容
 
-### 可选实现
-- 可使用：`rattler_conda_types`、`resolvo`/libsolv 绑定方案（二选一并文档化）、`reqwest`、`serde`、Rust workspace 分 crate 演进。
-- 可使用：先复用 `viper-core` 现有模块，再按能力重构（如 `solver`、`transaction`、`state` 拆分）。
-- 禁止：以“询问用户口头规则”替代 `mamba/` 源码与测试验证。
-- 禁止：在生产路径使用 `unwrap()`、忽略错误、或无测试直接改动兼容语义。
-- 禁止：跳过 `dry-run/offline` 关键分支验证即宣称兼容。
+## Feasibility Hints and Suggestions
 
-## 可行性提示与建议
+### Conceptual Approach
+建议按 `mamba` 的控制流分四层实现，而不是按当前 Rust 文件粗暴补丁式迭代：
 
-> **说明**：本节仅用于参考与理解，属于建议性内容，不是强制实现指令。
+1. 输入层  
+   `CLI args / rc / env vars / file specs / lockfile -> NormalizedRequest`
 
-### 概念实现路径
-建议采用“行为对齐优先”的四层实现路径：
-1. 输入层：统一 CLI、env file、config 合并规则，先固定请求模型。
-2. 索引层：稳定 repodata 拉取/缓存/离线语义，构建可复现包索引视图。
-3. 求解层：将当前候选排序替换为环境级求解，输出可审计的 transaction plan。
-4. 执行层：实现 link/unlink 与失败回滚，保持 `conda-meta` 与历史记录一致。
+2. 索引层  
+   `NormalizedRequest -> channel URLs -> repodata cache policy -> package universe`
 
-伪流程：
-`OperationRequest -> NormalizeSpecs -> LoadIndexes -> SolveEnvironment -> BuildTransaction -> (dry-run ? render : apply+persist) -> Report`.
+3. 求解层  
+   `NormalizedRequest + installed prefix snapshot -> solver request -> target solution`
 
-### 相关参考
-- `mamba/micromamba/src/main.cpp` - CLI 启动、异常处理与子命令入口模式。
-- `mamba/micromamba/src/create.cpp` - 环境创建命令语义与参数流。
-- `mamba/micromamba/src/install.cpp` - 安装命令核心路径。
-- `mamba/micromamba/src/remove.cpp` - 卸载路径与前缀处理。
-- `mamba/libmamba/src/api/create.cpp` - create API 流程编排参考。
-- `mamba/libmamba/src/api/install.cpp` - install API 流程编排参考。
-- `mamba/libmamba/src/core/subdir_index.cpp` - repodata/subdir 索引处理。
-- `mamba/libmamba/src/core/transaction.cpp` - 事务与执行语义。
-- `mamba/libmamba/src/core/prefix_data.cpp` - 前缀状态数据模型。
-- `mamba/libmamba/src/solver/helpers.cpp` - 求解辅助逻辑入口。
-- `mamba/docs/source/advanced_usage/package_resolution.rst` - channel priority 与版本选择策略说明。
-- `mamba/micromamba/tests/test_create.py` - create 行为测试样例。
-- `mamba/micromamba/tests/test_install.py` - install 行为测试样例。
-- `mamba/micromamba/tests/test_remove.py` - remove 行为测试样例。
-- `crates/viper-core/src/repodata.rs` - 现有缓存与条件请求实现基线。
-- `crates/viper-core/src/solver.rs` - 当前“单包优选”逻辑，后续替换入口。
-- `crates/viper-core/src/core.rs` - 操作编排总入口。
-- `crates/viper-core/src/state.rs` - 受管前缀状态持久化实现。
-- `crates/viper-cli/src/main.rs` - 当前 CLI 参数与子命令定义。
+4. 事务层  
+   `target solution -> transaction plan -> dry-run render or apply + history/state persist`
 
-## 依赖与执行顺序
+建议引入以下内部数据模型：
+- `NormalizedRequest`
+- `SpecSource`（cli, yaml, classic, explicit, lockfile）
+- `PrefixSnapshot`
+- `SolveRequest`
+- `TransactionPlan`
+- `OperationReport`
 
-### 里程碑
-1. 里程碑 1：兼容基线与行为矩阵固化
-   - 阶段 A：逐条梳理 `mamba/micromamba/src` 与 `mamba/micromamba/tests`，形成 `viper` 对照矩阵（命令、参数、错误语义）。
-   - 阶段 B：为现有 `viper` 行为补齐回归测试，冻结当前基线。
+### Relevant References
+- `mamba/micromamba/src/main.cpp` - CLI 解析、异常处理、子命令入口
+- `mamba/micromamba/src/create.cpp` - `create` 只是 install options 的专门化包装
+- `mamba/micromamba/src/install.cpp` - install/revision 路径入口
+- `mamba/micromamba/src/remove.cpp` - remove flags、`--prune-deps`、`--force`、`--all`
+- `mamba/libmamba/src/api/install.cpp` - config load、file specs hook、explicit install、prefix checks、request 构建
+- `mamba/libmamba/src/api/remove.cpp` - `Keep + Remove(clean_dependencies)` 的 solver-backed remove 语义
+- `mamba/libmamba/src/core/subdir_index.cpp` - cache metadata、304、TTL、state file 读写
+- `mamba/libmamba/src/core/prefix_data.cpp` - 已安装记录、pip 视图、拓扑顺序、history 协作
+- `mamba/libmamba/src/core/transaction.cpp` - explicit transaction、solver transaction、history entry、下载与执行阶段
+- `mamba/libmamba/src/solver/helpers.cpp` - python 版本相关求解辅助逻辑
+- `mamba/micromamba/tests/test_create.py` - target prefix、file specs、lockfile、explicit 行为
+- `mamba/micromamba/tests/test_install.py` - target prefix checks、config-only、spec source matrix
+- `mamba/micromamba/tests/test_remove.py` - prune/force/default remove、history 与 in-use 边界
 
-2. 里程碑 2：索引与请求规范化
-   - 阶段 A：统一 spec/channel/config/env-file 合并规则，清理 `core.rs` 输入分支。
-   - 阶段 B：强化 repodata 缓存/离线/304 路径测试与错误分类。
+## Dependencies and Sequence
 
-3. 里程碑 3：求解器升级
-   - 阶段 A：选型并接入环境级求解引擎（`resolvo` 或 libsolv 绑定），实现传递依赖闭包。
-   - 阶段 B：对齐 strict channel priority、版本/构建选择策略，并输出冲突解释。
+### Milestones
+1. Milestone 1：命令流与兼容矩阵固化
+   - Phase A: 梳理 `create/install/remove/list/info/config` 的 CLI 参数、target prefix checks、JSON 关键字段。
+   - Phase B: 基于 `test_create.py`、`test_install.py`、`test_remove.py` 建立本地兼容矩阵。
+   - Phase C: 对现有 `viper-cli` 行为做差异标注，区分“已对齐 / 偏差 / 未实现”。
 
-4. 里程碑 4：事务执行与回滚
-   - 阶段 A：设计 transaction plan 数据结构（link/unlink/fetch/extract）。
-   - 阶段 B：落地 apply/rollback，并保证 `dry-run` 与失败恢复的可验证性。
+2. Milestone 2：请求归一化与 spec 源模型
+   - Phase A: 将 CLI specs、YAML、classic、explicit、lockfile 统一建模为 `SpecSource`。
+   - Phase B: 复刻 `file_specs_hook` 的 `yaml vs other` 语义与 explicit 短路行为。
+   - Phase C: 固定 target prefix 决策顺序，与 `--print-config-only` 视图保持一致。
+   - Phase D: 为非法 spec、空文件、mixed file types、invalid env name 建立失败测试。
 
-5. 里程碑 5：CLI/JSON 稳定化与端到端收敛
-   - 阶段 A：对齐高频输出字段和错误格式，补齐集成测试快照。
-   - 阶段 B：跑通工作区质量门禁并整理迁移文档。
+3. Milestone 3：索引与缓存层收敛
+   - Phase A: 对齐 `current_repodata.json` / `repodata.json` 选择逻辑。
+   - Phase B: 对齐 cache state、TTL、304、offline fallback、error taxonomy。
+   - Phase C: 预留 shard/zstd 路径的接口边界，即使首版不实现，也要避免缓存模型写死。
 
-依赖关系：里程碑 1 是 2/3/4/5 的前置；里程碑 2 是 3 的前置；里程碑 3 是 4 的前置；里程碑 4 与 5 可部分并行，但 5 的最终验收依赖 4 完成。
+4. Milestone 4：前缀状态与历史模型
+   - Phase A: 抽离已安装 conda/pip 包视图与 requested specs map。
+   - Phase B: 统一 history append、revisions 读取、dist-name 渲染。
+   - Phase C: 明确 prefix load/persist 的错误边界，避免业务逻辑直接操纵文件树。
 
-## 实施备注
+5. Milestone 5：环境级 solver request 落地
+   - Phase A: 固定生产求解引擎，优先在本里程碑前半段完成选型和 adapter 接口定义。
+   - Phase B: create/install 统一进入 `SolveRequest` 构建路径。
+   - Phase C: remove 默认路径改用 `Keep + Remove(clean_dependencies)` 语义，保留 `--force` 特殊分支。
+   - Phase D: 对齐 strict channel priority、installed preference、conflict explanation。
 
-### 代码风格要求
-- 实现代码与注释不得包含计划术语，例如 `AC-`、`Milestone`、`Step`、`Phase` 等流程标记。
-- 这些术语只用于计划文档，不应出现在最终代码中。
-- 代码命名应使用面向领域的语义化名称。
-- 所有技术决策记录应附对应 `mamba/` 源码路径或测试路径，避免无依据偏离。
+6. Milestone 6：事务计划与执行
+   - Phase A: 用统一 `TransactionPlan` 表达 fetch/extract/link/unlink。
+   - Phase B: 让 solver install、explicit install、remove 共用同一执行器。
+   - Phase C: 对齐 dry-run 无写入、persist/history 失败回滚、prefix layout 恢复。
+   - Phase D: 为 in-use 文件、history I/O 失败、部分写入故障补测试。
+
+7. Milestone 7：输出稳定化
+   - Phase A: 对齐 `list` 的 explicit/hash/revisions/filter 行为。
+   - Phase B: 对齐 `info/config` 的 JSON key 集与错误语义。
+   - Phase C: 为高频 JSON 输出补 snapshot tests，锁定字段和格式。
+
+8. Milestone 8：回归套件与收口
+   - Phase A: 将兼容矩阵每一行绑定到 enforcing test。
+   - Phase B: 清理“本地测试通过但与上游不一致”的假阳性条目。
+   - Phase C: 跑通全量门禁并整理剩余偏差列表。
+
+### Dependency Rules
+- Milestone 1 是所有后续阶段的入口，没有矩阵就无法判断兼容差异是否真实。
+- Milestone 2 是 Milestone 3、5 的前置，因为 solver request 和 repodata 选择都依赖统一输入模型。
+- Milestone 3 与 Milestone 4 共同构成 Milestone 5 的前置。
+- Milestone 5 是 Milestone 6 的前置，没有稳定 target solution 就无法定义正确事务计划。
+- Milestone 6 与 Milestone 7 可并行收尾，但 Milestone 7 的最终快照必须建立在稳定事务语义之上。
+
+## Implementation Notes
+
+### Code Style Requirements
+- 实现代码与注释不得包含计划流程术语，例如 `AC-`、`Milestone`、`Phase`、`Step`。
+- 代码内部使用领域语义命名，例如 `normalized_request`、`solve_request`、`requested_specs_map`、`transaction_plan`。
+- 任何兼容语义调整都必须同时附带：
+  - 上游源码或测试路径证据
+  - 本地 enforcing test
+  - 若行为存在刻意偏差，需在文档中显式注明原因与范围
+
+### Recommended File Ownership
+- `crates/viper-cli/src/main.rs`
+  - 保持 CLI 参数面与子命令入口稳定
+- `crates/viper-core/src/core.rs`
+  - 只负责命令编排，不承载过多解析细节
+- `crates/viper-core/src/spec.rs`
+  - 负责所有 spec 源解析与归一化
+- `crates/viper-core/src/repodata.rs`
+  - 负责缓存与网络请求策略
+- `crates/viper-core/src/solver.rs` 或其 adapter 子模块
+  - 负责 solver request/solution 与解释
+- `crates/viper-core/src/state.rs`
+  - 负责 prefix state/history/pip 视图
+- `crates/viper-core/src/transaction.rs`
+  - 负责 transaction plan 与 apply/rollback
+
+### Review Gates
+- 每完成一个里程碑，至少要补一组“正向 + 反向”测试，而不是只补 happy path。
+- 在声称兼容前，优先检查：
+  - 是否已有 upstream reference
+  - 是否已有 enforcing test
+  - 是否存在“本地测试通过但上游行为不同”的假阳性
 
