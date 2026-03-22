@@ -1,5 +1,6 @@
 use std::fs;
 
+use regex::Regex;
 use serde_json::json;
 
 use crate::config::{ConfigInput, ConfigStore, build_config};
@@ -66,7 +67,8 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             };
             let solved = solve_to_actions(&normalized.conda_specs, &repodata, &solve_options)
                 .map_err(CoreError::UnsatisfiedSpecs)?;
-            let mut link_actions = solved.actions;
+            let conda_link_actions = solved.actions;
+            let mut link_actions = conda_link_actions.clone();
             link_actions.extend(normalized.pip_specs.iter().map(|spec| {
                 crate::transaction::PlannedLink {
                     name: crate::spec::package_name_from_spec(spec)
@@ -80,12 +82,23 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             }));
 
             let mut state = EnvironmentState::empty();
-            state.install_specs(&normalized.conda_specs)?;
-            state.install_pip_specs(&normalized.pip_specs)?;
+            let platform = current_platform_subdir();
+            let changed = state.install_conda_links(
+                &conda_link_actions,
+                &normalized.conda_specs,
+                &platform,
+            )?;
+            let pip_changed = state.install_pip_specs(&normalized.pip_specs, &platform)?;
 
             if !config.dry_run {
                 ensure_prefix_layout(&target_prefix)?;
-                state.save(&target_prefix)?;
+                state.persist(&target_prefix)?;
+                EnvironmentState::append_history(
+                    &target_prefix,
+                    "create",
+                    &conda_link_actions,
+                    &[],
+                )?;
             }
 
             let mut result = OperationResult::ok(
@@ -96,6 +109,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "channels": normalized.channels,
                     "specs": normalized.conda_specs,
                     "pip_specs": normalized.pip_specs,
+                    "changed": changed + pip_changed,
                     "actions": {
                         "link": link_actions,
                     },
@@ -129,7 +143,12 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 &globals.channels,
                 globals.name.as_deref(),
             )?;
-            let repodata_filename = select_repodata_filename(&normalized.conda_specs);
+            let mut state = EnvironmentState::load(&target_prefix)?;
+            let mut solve_specs = state.conda_locked_specs();
+            solve_specs.extend(normalized.conda_specs.clone());
+            let solve_specs = dedup_specs(solve_specs);
+
+            let repodata_filename = select_repodata_filename(&solve_specs);
             let repodata = if normalized.conda_specs.is_empty() {
                 Vec::new()
             } else {
@@ -146,9 +165,10 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 channels: normalized.channels.clone(),
                 strict_channel_priority: config.channel_priority == "strict",
             };
-            let solved = solve_to_actions(&normalized.conda_specs, &repodata, &solve_options)
+            let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
                 .map_err(CoreError::UnsatisfiedSpecs)?;
-            let mut link_actions = solved.actions;
+            let conda_link_actions = solved.actions;
+            let mut link_actions = conda_link_actions.clone();
             link_actions.extend(normalized.pip_specs.iter().map(|spec| {
                 crate::transaction::PlannedLink {
                     name: crate::spec::package_name_from_spec(spec)
@@ -161,12 +181,22 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 }
             }));
 
-            let mut state = EnvironmentState::load(&target_prefix)?;
-            let changed = state.install_specs(&normalized.conda_specs)?;
-            let pip_changed = state.install_pip_specs(&normalized.pip_specs)?;
+            let platform = current_platform_subdir();
+            let changed = state.install_conda_links(
+                &conda_link_actions,
+                &normalized.conda_specs,
+                &platform,
+            )?;
+            let pip_changed = state.install_pip_specs(&normalized.pip_specs, &platform)?;
 
             if !config.dry_run {
-                state.save(&target_prefix)?;
+                state.persist(&target_prefix)?;
+                EnvironmentState::append_history(
+                    &target_prefix,
+                    "install",
+                    &conda_link_actions,
+                    &[],
+                )?;
             }
 
             let mut result = OperationResult::ok(
@@ -219,7 +249,8 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let mut state = EnvironmentState::load(&target_prefix)?;
             let removed = state.remove_specs(&specs)?;
             if !config.dry_run {
-                state.save(&target_prefix)?;
+                state.persist(&target_prefix)?;
+                EnvironmentState::append_history(&target_prefix, "remove", &[], &specs)?;
             }
 
             Ok(OperationResult::ok(
@@ -248,16 +279,16 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 ));
             }
 
-            let state = EnvironmentState::load(&target_prefix)?;
-            let package_views = render_list_output(state.packages, &list_options)?;
             let payload = if list_options.revisions {
+                let revisions = EnvironmentState::revisions(&target_prefix).unwrap_or_default();
                 json!({
                     "target_prefix": target_prefix,
-                    "revisions": [],
-                    "revisions_supported": false,
-                    "reason": "revision history is not implemented yet",
+                    "revisions": revisions,
+                    "revisions_supported": true,
                 })
             } else {
+                let state = EnvironmentState::load(&target_prefix)?;
+                let package_views = render_list_output(state.packages, &list_options)?;
                 json!({
                     "target_prefix": target_prefix,
                     "packages": package_views,
@@ -494,7 +525,7 @@ fn render_list_output(
     mut packages: Vec<PackageRecord>,
     options: &ListOptions,
 ) -> Result<serde_json::Value, CoreError> {
-    if options.md5 && options.sha256 {
+    if options.explicit && options.md5 && options.sha256 {
         return Err(CoreError::InvalidListOptions(
             "only one of --md5 and --sha256 can be specified".to_string(),
         ));
@@ -576,7 +607,7 @@ fn render_list_output(
                 "channel": package_channel(pkg),
                 "base_url": package_base_url(pkg),
                 "url": package_url(pkg),
-                "platform": current_platform_subdir(),
+                "platform": pkg.platform,
             })
         })
         .collect::<Vec<_>>();
@@ -584,55 +615,40 @@ fn render_list_output(
 }
 
 fn package_name_matches(name: &str, pattern: &str, full_name: bool) -> bool {
-    if full_name {
-        return name == pattern;
-    }
-    name.contains(pattern)
+    let resolved = if full_name {
+        format!("^(?:{pattern})$")
+    } else {
+        pattern.to_string()
+    };
+    Regex::new(&resolved).is_ok_and(|re| re.is_match(name))
 }
 
 fn package_version(pkg: &PackageRecord) -> String {
-    pkg.spec
-        .split_once('=')
-        .map(|(_, v)| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+    pkg.version.clone()
 }
 
 fn package_build_string(pkg: &PackageRecord) -> String {
-    if pkg.source == "pip" {
-        "pypi_0".to_string()
-    } else {
-        "0".to_string()
-    }
+    pkg.build_string.clone()
 }
 
 fn package_channel(pkg: &PackageRecord) -> String {
-    if pkg.source == "pip" {
-        "pypi".to_string()
-    } else {
-        "conda-forge".to_string()
-    }
+    pkg.channel.clone()
 }
 
 fn package_base_url(pkg: &PackageRecord) -> String {
-    if pkg.source == "pip" {
-        "https://pypi.org/".to_string()
-    } else {
-        "https://conda.anaconda.org/conda-forge".to_string()
-    }
+    pkg.base_url.clone()
 }
 
 fn package_url(pkg: &PackageRecord) -> String {
-    if pkg.source == "pip" {
-        format!("https://pypi.org/project/{}/", pkg.name)
-    } else {
-        format!(
-            "{}/{}/{}-{}-{}.tar.bz2",
-            package_base_url(pkg),
-            current_platform_subdir(),
-            pkg.name,
-            package_version(pkg),
-            package_build_string(pkg)
-        )
+    pkg.url.clone()
+}
+
+fn dedup_specs(specs: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for spec in specs {
+        if !out.iter().any(|existing| existing == &spec) {
+            out.push(spec);
+        }
     }
+    out
 }

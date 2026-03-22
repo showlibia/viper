@@ -102,11 +102,8 @@ fn create_install_list_remove_roundtrip() {
     let remove_json: Value = serde_json::from_slice(&output).expect("valid json");
     assert_eq!(remove_json["success"], true);
 
-    let state_file = prefix.join("conda-meta").join("viper-state.json");
-    let raw = fs::read_to_string(state_file).expect("state file exists");
-    let state: Value = serde_json::from_str(&raw).expect("valid state json");
-    let names = state["packages"].as_array().expect("packages array");
-    assert!(!names.iter().any(|p| p["name"] == "numpy"));
+    let names = installed_package_names(&prefix);
+    assert!(!names.iter().any(|name| name == "numpy"));
 }
 
 #[test]
@@ -319,6 +316,103 @@ fn list_explicit_rejects_md5_and_sha256_together() {
 }
 
 #[test]
+fn list_regex_matches_installed_packages() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("pytables", "3.9.2", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "pytables",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "py.*",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let packages = body["data"]["packages"].as_array().expect("packages array");
+    assert!(packages.iter().any(|pkg| pkg["name"] == "python"));
+    assert!(packages.iter().any(|pkg| pkg["name"] == "pytables"));
+}
+
+#[test]
+fn list_revisions_reads_history() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--revisions",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["data"]["revisions"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
+}
+
+#[test]
 fn create_from_env_file_uses_yaml_name_channels_and_pip_specs() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
@@ -379,10 +473,7 @@ dependencies:
         serde_json::json!(["conda-forge", "bioconda"])
     );
 
-    let state_file = expected_prefix.join("conda-meta").join("viper-state.json");
-    let raw = fs::read_to_string(state_file).expect("state file exists");
-    let state: Value = serde_json::from_str(&raw).expect("valid state json");
-    let packages = state["packages"].as_array().expect("packages array");
+    let packages = load_installed_records(&expected_prefix);
     assert!(
         packages
             .iter()
@@ -1208,8 +1299,7 @@ fn create_fails_without_repodata_and_does_not_write_state() {
         .assert()
         .failure();
 
-    let state_file = prefix.join("conda-meta").join("viper-state.json");
-    assert!(!state_file.exists());
+    assert!(!prefix.join("conda-meta").exists());
 }
 
 #[test]
@@ -1406,4 +1496,35 @@ fn write_viperrc(home: &Path, content: &str) {
     let rc_dir = home.join(".viper");
     fs::create_dir_all(&rc_dir).expect("create rc dir");
     fs::write(rc_dir.join("viperrc"), content).expect("write viperrc");
+}
+
+fn load_installed_records(prefix: &Path) -> Vec<Value> {
+    let mut out = Vec::new();
+    let meta_dir = prefix.join("conda-meta");
+    let entries = fs::read_dir(meta_dir).expect("read conda-meta");
+    for entry in entries {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|v| v.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = fs::read_to_string(path).expect("read package json");
+        out.push(serde_json::from_str(&raw).expect("valid package json"));
+    }
+    out
+}
+
+fn installed_package_names(prefix: &Path) -> Vec<String> {
+    load_installed_records(prefix)
+        .into_iter()
+        .filter_map(|record| {
+            record
+                .get("name")
+                .and_then(|name| name.as_str())
+                .map(ToString::to_string)
+        })
+        .collect()
 }

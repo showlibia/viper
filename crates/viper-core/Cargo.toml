@@ -10,6 +10,7 @@ chrono.workspace = true
 dirs.workspace = true
 md5 = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+regex = "1.11"
 rattler_conda_types = "*"
 serde.workspace = true
 serde_json.workspace = true

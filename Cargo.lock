@@ -2259,6 +2259,7 @@ dependencies = [
  "dirs",
  "md5",
  "rattler_conda_types",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

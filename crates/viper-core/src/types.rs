@@ -67,14 +67,55 @@ pub struct OperationRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageRecord {
     pub name: String,
+    #[serde(default = "default_unknown")]
+    pub version: String,
+    #[serde(default = "default_build")]
+    pub build_string: String,
+    #[serde(default = "default_channel")]
+    pub channel: String,
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub url: String,
     pub spec: String,
     #[serde(default = "default_package_source")]
     pub source: String,
+    #[serde(default)]
+    pub depends: Vec<String>,
     pub installed_at: String,
+    #[serde(default = "default_platform")]
+    pub platform: String,
 }
 
 fn default_package_source() -> String {
     "conda".to_string()
+}
+
+fn default_unknown() -> String {
+    "unknown".to_string()
+}
+
+fn default_build() -> String {
+    "0".to_string()
+}
+
+fn default_channel() -> String {
+    "conda-forge".to_string()
+}
+
+fn default_base_url() -> String {
+    "https://conda.anaconda.org/conda-forge".to_string()
+}
+
+fn default_platform() -> String {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-64".to_string(),
+        ("linux", "aarch64") => "linux-aarch64".to_string(),
+        ("macos", "x86_64") => "osx-64".to_string(),
+        ("macos", "aarch64") => "osx-arm64".to_string(),
+        ("windows", "x86_64") => "win-64".to_string(),
+        (os, arch) => format!("{os}-{arch}"),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
