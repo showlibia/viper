@@ -8,17 +8,17 @@ use crate::config::{ConfigInput, ConfigStore, build_config};
 use crate::error::CoreError;
 use crate::repodata::{RepoPackage, fetch_packages};
 use crate::solver::{SolveOptions, solve_to_actions, spec_requires_full_repodata};
-use crate::spec::{
-    SpecFileKind, normalize_spec, package_name_from_spec, parse_match_spec, parse_spec_file,
-};
+use crate::spec::{SpecFileKind, normalize_spec, parse_match_spec, parse_spec_file};
 use crate::state::{EnvironmentState, is_managed_prefix};
-use crate::transaction::{TransactionExecutor, TransactionPlan};
+use crate::transaction::{PlannedLink, TransactionExecutor, TransactionPlan};
 use crate::types::{
     CliConfigCommand, CliOperation, ListOptions, OperationRequest, OperationResult, PackageRecord,
 };
 
 struct NormalizedRequestInputs {
     conda_specs: Vec<String>,
+    explicit_specs: Vec<String>,
+    explicit_mode: bool,
     pip_specs: Vec<String>,
     yaml_name: Option<String>,
     yaml_file_stem: Option<String>,
@@ -52,28 +52,35 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 normalized.yaml_name.as_deref(),
                 normalized.yaml_file_stem.as_deref(),
             )?;
-            let repodata_filename = select_repodata_filename(&normalized.conda_specs);
-            let repodata = if normalized.conda_specs.is_empty() {
-                Vec::new()
+            let (conda_link_actions, solver_trace) = if normalized.explicit_mode {
+                (
+                    explicit_specs_to_links(&normalized.explicit_specs)?,
+                    None::<Vec<String>>,
+                )
             } else {
-                fetch_packages(
-                    &normalized.channels,
-                    &current_platform_subdir(),
-                    config.offline,
-                    &config.root_prefix.join("pkgs").join("cache"),
-                    config.local_repodata_ttl,
-                    repodata_filename,
-                )?
+                let repodata_filename = select_repodata_filename(&normalized.conda_specs);
+                let repodata = if normalized.conda_specs.is_empty() {
+                    Vec::new()
+                } else {
+                    fetch_packages(
+                        &normalized.channels,
+                        &current_platform_subdir(),
+                        config.offline,
+                        &config.root_prefix.join("pkgs").join("cache"),
+                        config.local_repodata_ttl,
+                        repodata_filename,
+                    )?
+                };
+                let solve_options = SolveOptions {
+                    channels: normalized.channels.clone(),
+                    strict_channel_priority: config.channel_priority == "strict",
+                    installed_preferred: HashMap::new(),
+                    user_requested: requested_names(&normalized.conda_specs),
+                };
+                let solved = solve_to_actions(&normalized.conda_specs, &repodata, &solve_options)
+                    .map_err(CoreError::UnsatisfiedSpecs)?;
+                (solved.actions, Some(solved.trace))
             };
-            let solve_options = SolveOptions {
-                channels: normalized.channels.clone(),
-                strict_channel_priority: config.channel_priority == "strict",
-                installed_preferred: HashMap::new(),
-                user_requested: requested_names(&normalized.conda_specs),
-            };
-            let solved = solve_to_actions(&normalized.conda_specs, &repodata, &solve_options)
-                .map_err(CoreError::UnsatisfiedSpecs)?;
-            let conda_link_actions = solved.actions;
             let conda_plan = TransactionPlan::from_solved(&[], &conda_link_actions);
             let platform = current_platform_subdir();
             let mut link_actions = conda_plan.link.clone();
@@ -98,7 +105,11 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
 
             let tx = TransactionExecutor {
                 operation: "create".to_string(),
-                requested_specs: normalized.conda_specs.clone(),
+                requested_specs: if normalized.explicit_mode {
+                    normalized.explicit_specs.clone()
+                } else {
+                    normalized.conda_specs.clone()
+                },
                 pip_specs: normalized.pip_specs.clone(),
                 platform: platform.clone(),
                 dry_run: config.dry_run,
@@ -112,13 +123,13 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "root_prefix": config.root_prefix,
                     "target_prefix": target_prefix,
                     "channels": normalized.channels,
-                    "specs": normalized.conda_specs,
+                    "specs": if normalized.explicit_mode { normalized.explicit_specs.clone() } else { normalized.conda_specs.clone() },
                     "pip_specs": normalized.pip_specs,
                     "changed": outcome.linked + outcome.unlinked + outcome.pip_changed,
                     "actions": {
                         "link": link_actions,
                     },
-                    "solver_trace": if config.verbose >= 3 { Some(solved.trace) } else { None },
+                    "solver_trace": if config.verbose >= 3 { solver_trace } else { None },
                     "dry_run": config.dry_run,
                 }),
             );
@@ -149,38 +160,45 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 globals.name.as_deref(),
             )?;
             let state = EnvironmentState::load(&target_prefix)?;
-            let mut solve_specs = state.conda_locked_specs();
-            solve_specs.extend(normalized.conda_specs.clone());
-            let solve_specs = dedup_specs(solve_specs);
-
-            let repodata_filename = select_repodata_filename(&solve_specs);
-            let repodata = if solve_specs.is_empty() {
-                Vec::new()
+            let (conda_link_actions, solver_trace) = if normalized.explicit_mode {
+                (
+                    explicit_specs_to_links(&normalized.explicit_specs)?,
+                    None::<Vec<String>>,
+                )
             } else {
-                let mut repodata = fetch_packages(
-                    &normalized.channels,
-                    &current_platform_subdir(),
-                    config.offline,
-                    &config.root_prefix.join("pkgs").join("cache"),
-                    config.local_repodata_ttl,
-                    repodata_filename,
-                )?;
-                inject_installed_candidates(&mut repodata, &state.conda_packages());
-                repodata
+                let mut solve_specs = state.conda_locked_specs();
+                solve_specs.extend(normalized.conda_specs.clone());
+                let solve_specs = dedup_specs(solve_specs);
+
+                let repodata_filename = select_repodata_filename(&solve_specs);
+                let repodata = if solve_specs.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut repodata = fetch_packages(
+                        &normalized.channels,
+                        &current_platform_subdir(),
+                        config.offline,
+                        &config.root_prefix.join("pkgs").join("cache"),
+                        config.local_repodata_ttl,
+                        repodata_filename,
+                    )?;
+                    inject_installed_candidates(&mut repodata, &state.conda_packages());
+                    repodata
+                };
+                let solve_options = SolveOptions {
+                    channels: normalized.channels.clone(),
+                    strict_channel_priority: config.channel_priority == "strict",
+                    installed_preferred: state
+                        .conda_packages()
+                        .into_iter()
+                        .map(|pkg| (pkg.name, (pkg.version, pkg.build_string)))
+                        .collect(),
+                    user_requested: requested_names(&normalized.conda_specs),
+                };
+                let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
+                    .map_err(CoreError::UnsatisfiedSpecs)?;
+                (solved.actions, Some(solved.trace))
             };
-            let solve_options = SolveOptions {
-                channels: normalized.channels.clone(),
-                strict_channel_priority: config.channel_priority == "strict",
-                installed_preferred: state
-                    .conda_packages()
-                    .into_iter()
-                    .map(|pkg| (pkg.name, (pkg.version, pkg.build_string)))
-                    .collect(),
-                user_requested: requested_names(&normalized.conda_specs),
-            };
-            let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
-                .map_err(CoreError::UnsatisfiedSpecs)?;
-            let conda_link_actions = solved.actions;
             let conda_plan = TransactionPlan::from_solved(&state.packages, &conda_link_actions);
             let platform = current_platform_subdir();
             let mut link_actions = conda_plan.link.clone();
@@ -205,7 +223,11 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
 
             let tx = TransactionExecutor {
                 operation: "install".to_string(),
-                requested_specs: normalized.conda_specs.clone(),
+                requested_specs: if normalized.explicit_mode {
+                    normalized.explicit_specs.clone()
+                } else {
+                    normalized.conda_specs.clone()
+                },
                 pip_specs: normalized.pip_specs.clone(),
                 platform: platform.clone(),
                 dry_run: config.dry_run,
@@ -218,13 +240,13 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 json!({
                     "target_prefix": target_prefix,
                     "changed": outcome.linked + outcome.unlinked + outcome.pip_changed,
-                    "specs": normalized.conda_specs,
+                    "specs": if normalized.explicit_mode { normalized.explicit_specs.clone() } else { normalized.conda_specs.clone() },
                     "pip_specs": normalized.pip_specs,
                     "actions": {
                         "link": link_actions,
                         "unlink": conda_plan.unlink,
                     },
-                    "solver_trace": if config.verbose >= 3 { Some(solved.trace) } else { None },
+                    "solver_trace": if config.verbose >= 3 { solver_trace } else { None },
                     "dry_run": config.dry_run,
                 }),
             );
@@ -271,15 +293,40 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let mut preview = state.clone();
             let removed = if force {
                 preview.force_remove_specs(&specs)?
-            } else {
-                let mut keep_requested = EnvironmentState::requested_specs_map(&target_prefix)?
+            } else if no_prune_deps {
+                let keep_requested = EnvironmentState::requested_specs_map(&target_prefix)?
                     .into_keys()
                     .collect::<HashSet<_>>();
-                for spec in &specs {
-                    let name = package_name_from_spec(spec)?;
+                preview.remove_specs(&specs, false, &keep_requested)?
+            } else {
+                let removal_preview = preview.remove_specs(&specs, false, &HashSet::new())?;
+                let removal_names = removal_preview
+                    .into_iter()
+                    .map(|item| item.name)
+                    .collect::<HashSet<_>>();
+                let mut keep_requested = EnvironmentState::requested_specs_map(&target_prefix)?
+                    .into_iter()
+                    .collect::<HashMap<_, _>>();
+                for name in removal_names {
                     keep_requested.remove(&name);
                 }
-                preview.remove_specs(&specs, !no_prune_deps, &keep_requested)?
+                let solve_specs = dedup_specs(keep_requested.into_values().collect::<Vec<_>>());
+                let mut repodata = Vec::new();
+                inject_installed_candidates(&mut repodata, &state.conda_packages());
+                let solve_options = SolveOptions {
+                    channels: config.channels.clone(),
+                    strict_channel_priority: config.channel_priority == "strict",
+                    installed_preferred: state
+                        .conda_packages()
+                        .into_iter()
+                        .map(|pkg| (pkg.name, (pkg.version, pkg.build_string)))
+                        .collect(),
+                    user_requested: requested_names(&solve_specs),
+                };
+                let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
+                    .map_err(CoreError::UnsatisfiedSpecs)?;
+                let solved_plan = TransactionPlan::from_solved(&state.packages, &solved.actions);
+                solved_plan.unlink
             };
             let remove_plan = TransactionPlan {
                 fetch: Vec::new(),
@@ -440,24 +487,39 @@ fn normalize_request_inputs(
     cli_name: Option<&str>,
 ) -> Result<NormalizedRequestInputs, CoreError> {
     let mut conda_specs = normalize_and_validate_match_specs(cli_specs)?;
+    let mut explicit_specs = Vec::new();
+    let mut explicit_mode = false;
     let mut pip_specs = Vec::new();
     let mut yaml_name = None;
     let mut yaml_file_stem = None;
     let mut yaml_channels = Vec::new();
     let mut warnings = Vec::new();
-    let mut file_kind: Option<SpecFileKind> = None;
+    let mut file_kind_is_yaml: Option<bool> = None;
 
     for path in files {
         let parsed = parse_spec_file(&path)?;
-        if let Some(kind) = file_kind {
-            if kind != parsed.kind {
+        let is_yaml = matches!(parsed.kind, SpecFileKind::Yaml);
+        if let Some(expected) = file_kind_is_yaml {
+            if expected != is_yaml {
                 return Err(CoreError::InvalidEnvironmentFile(format!(
-                    "all --file inputs must have the same format, got mixed {:?} and {:?}",
-                    kind, parsed.kind
+                    "all --file inputs must be either YAML or non-YAML, got mixed types at '{}'",
+                    path.display()
                 )));
             }
         } else {
-            file_kind = Some(parsed.kind);
+            file_kind_is_yaml = Some(is_yaml);
+        }
+
+        if parsed.kind == SpecFileKind::Explicit {
+            explicit_mode = true;
+            explicit_specs = parsed.env.conda_specs;
+            conda_specs.clear();
+            pip_specs.clear();
+            warnings.push(format!(
+                "explicit spec file '{}' switches request into explicit mode",
+                path.display()
+            ));
+            break;
         }
 
         let env = parsed.env;
@@ -490,12 +552,16 @@ fn normalize_request_inputs(
     }
 
     maybe_warn_cli_name_override(cli_name, yaml_name.as_deref(), &mut warnings);
-    for spec in &conda_specs {
-        parse_match_spec(spec)?;
+    if !explicit_mode {
+        for spec in &conda_specs {
+            parse_match_spec(spec)?;
+        }
     }
 
     Ok(NormalizedRequestInputs {
         conda_specs,
+        explicit_specs,
+        explicit_mode,
         pip_specs,
         yaml_name,
         yaml_file_stem,
@@ -513,6 +579,74 @@ fn normalize_and_validate_match_specs(specs: Vec<String>) -> Result<Vec<String>,
             Ok(normalized)
         })
         .collect()
+}
+
+fn explicit_specs_to_links(specs: &[String]) -> Result<Vec<PlannedLink>, CoreError> {
+    specs
+        .iter()
+        .map(|spec| explicit_spec_to_link(spec))
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn explicit_spec_to_link(spec: &str) -> Result<PlannedLink, CoreError> {
+    let normalized = normalize_spec(spec)?;
+    if !normalized.starts_with("http://") && !normalized.starts_with("https://") {
+        return Err(CoreError::InvalidEnvironmentFile(format!(
+            "explicit entry must be a URL: {normalized}"
+        )));
+    }
+    let (url_no_fragment, fragment) = normalized.split_once('#').unwrap_or((&normalized, ""));
+    let filename = url_no_fragment.rsplit('/').next().ok_or_else(|| {
+        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {normalized}"))
+    })?;
+    let dist = filename
+        .strip_suffix(".tar.bz2")
+        .or_else(|| filename.strip_suffix(".conda"))
+        .ok_or_else(|| {
+            CoreError::InvalidEnvironmentFile(format!(
+                "explicit entry must end with .tar.bz2 or .conda: {filename}"
+            ))
+        })?;
+    let mut parts = dist.rsplitn(3, '-');
+    let build = parts.next().ok_or_else(|| {
+        CoreError::InvalidEnvironmentFile(format!("explicit entry missing build: {filename}"))
+    })?;
+    let version = parts.next().ok_or_else(|| {
+        CoreError::InvalidEnvironmentFile(format!("explicit entry missing version: {filename}"))
+    })?;
+    let name = parts.next().ok_or_else(|| {
+        CoreError::InvalidEnvironmentFile(format!("explicit entry missing name: {filename}"))
+    })?;
+    let (prefix, _) = url_no_fragment.rsplit_once('/').ok_or_else(|| {
+        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {normalized}"))
+    })?;
+    let (base_url, subdir) = prefix.rsplit_once('/').ok_or_else(|| {
+        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {normalized}"))
+    })?;
+
+    let (md5, sha256) = if fragment.len() == 32 {
+        (Some(fragment.to_string()), None)
+    } else if fragment.len() == 64 {
+        (None, Some(fragment.to_string()))
+    } else {
+        (None, None)
+    };
+
+    Ok(PlannedLink {
+        name: name.to_string(),
+        version: version.to_string(),
+        build: build.to_string(),
+        build_number: 0,
+        dist_name: dist.to_string(),
+        channel: base_url.to_string(),
+        base_url: base_url.to_string(),
+        url: url_no_fragment.to_string(),
+        md5,
+        sha256,
+        depends: Vec::new(),
+        platform: subdir.to_string(),
+        source: "conda".to_string(),
+    })
 }
 
 fn resolve_create_target_prefix(

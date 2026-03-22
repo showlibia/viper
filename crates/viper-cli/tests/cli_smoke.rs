@@ -1759,7 +1759,7 @@ fn create_merges_multiple_explicit_files() {
 
     let names = installed_package_names(&prefix);
     assert!(names.iter().any(|name| name == "python"));
-    assert!(names.iter().any(|name| name == "numpy"));
+    assert!(!names.iter().any(|name| name == "numpy"));
 }
 
 #[test]
@@ -1792,7 +1792,88 @@ fn create_rejects_mixed_file_spec_types() {
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|msg| msg.contains("all --file inputs must have the same format"))
+            .is_some_and(|msg| msg.contains("must be either YAML or non-YAML"))
+    );
+}
+
+#[test]
+fn create_allows_classic_and_explicit_file_combo() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let subdir = current_platform_subdir();
+
+    let classic = tmp.path().join("classic.txt");
+    let explicit = tmp.path().join("explicit.txt");
+    fs::write(&classic, "numpy\n").expect("write classic");
+    fs::write(
+        &explicit,
+        format!(
+            "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2\n"
+        ),
+    )
+    .expect("write explicit");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            classic.to_str().expect("utf8"),
+            "-f",
+            explicit.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(!names.iter().any(|name| name == "numpy"));
+}
+
+#[test]
+fn create_explicit_file_accepts_hash_url() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let subdir = current_platform_subdir();
+    let explicit = tmp.path().join("explicit.txt");
+    fs::write(
+        &explicit,
+        format!(
+            "@EXPLICIT\n# platform: {subdir}\nhttps://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2#deadbeefdeadbeefdeadbeefdeadbeef\n"
+        ),
+    )
+    .expect("write explicit");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            explicit.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let records = load_installed_records(&prefix);
+    let python = records
+        .iter()
+        .find(|record| record["name"] == "python")
+        .expect("python record");
+    assert_eq!(
+        python["md5"],
+        serde_json::json!("deadbeefdeadbeefdeadbeefdeadbeef")
     );
 }
 

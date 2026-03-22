@@ -155,29 +155,32 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpecFile, CoreError> {
     }
 
     let content = fs::read_to_string(path)?;
-    let lines = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect::<Vec<_>>();
-    if lines.is_empty() {
-        return Ok(ParsedSpecFile {
-            kind: SpecFileKind::Classic,
-            env: EnvSpecFile {
-                name: None,
-                channels: Vec::new(),
-                conda_specs: Vec::new(),
-                pip_specs: Vec::new(),
-            },
-        });
-    }
+    let lines = content.lines().map(str::trim).collect::<Vec<_>>();
+    let first_content = lines
+        .iter()
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .copied()
+        .ok_or_else(|| CoreError::InvalidEnvironmentFile("got an empty file".to_string()))?;
 
-    if lines[0].eq_ignore_ascii_case("@EXPLICIT") {
+    if first_content.eq_ignore_ascii_case("@EXPLICIT") {
         let mut conda_specs = Vec::new();
-        for line in lines.into_iter().skip(1) {
-            let spec = explicit_url_to_spec(line)?;
-            parse_match_spec(&spec)?;
-            conda_specs.push(spec);
+        let mut in_explicit_section = false;
+        for line in lines {
+            if line.is_empty() || line.starts_with("# platform:") {
+                continue;
+            }
+            if line.starts_with('#') {
+                continue;
+            }
+            if line.eq_ignore_ascii_case("@EXPLICIT") {
+                in_explicit_section = true;
+                continue;
+            }
+            if !in_explicit_section {
+                continue;
+            }
+            validate_explicit_url(line)?;
+            conda_specs.push(line.to_string());
         }
         return Ok(ParsedSpecFile {
             kind: SpecFileKind::Explicit,
@@ -192,6 +195,9 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpecFile, CoreError> {
 
     let mut conda_specs = Vec::new();
     for line in lines {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         let normalized = normalize_spec(line)?;
         parse_match_spec(&normalized)?;
         conda_specs.push(normalized);
@@ -207,16 +213,17 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpecFile, CoreError> {
     })
 }
 
-fn explicit_url_to_spec(url: &str) -> Result<String, CoreError> {
+fn validate_explicit_url(url: &str) -> Result<(), CoreError> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(CoreError::InvalidEnvironmentFile(format!(
             "explicit entry must be a URL: {url}"
         )));
     }
-    let filename = url.rsplit('/').next().ok_or_else(|| {
+    let (url_no_fragment, _) = url.split_once('#').unwrap_or((url, ""));
+    let filename = url_no_fragment.rsplit('/').next().ok_or_else(|| {
         CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {url}"))
     })?;
-    let stem = filename
+    let _stem = filename
         .strip_suffix(".tar.bz2")
         .or_else(|| filename.strip_suffix(".conda"))
         .ok_or_else(|| {
@@ -224,17 +231,7 @@ fn explicit_url_to_spec(url: &str) -> Result<String, CoreError> {
                 "explicit entry must end with .tar.bz2 or .conda: {filename}"
             ))
         })?;
-    let mut parts = stem.rsplitn(3, '-');
-    let build = parts.next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry missing build: {filename}"))
-    })?;
-    let version = parts.next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry missing version: {filename}"))
-    })?;
-    let name = parts.next().ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry missing name: {filename}"))
-    })?;
-    Ok(format!("{name}={version}={build}"))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -440,6 +437,48 @@ https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2
 
         let parsed = parse_spec_file(&file).expect("parse explicit");
         assert_eq!(parsed.kind, SpecFileKind::Explicit);
-        assert_eq!(parsed.env.conda_specs, vec!["python=3.12.0=0".to_string()]);
+        assert_eq!(
+            parsed.env.conda_specs,
+            vec![
+                "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_supports_explicit_urls_with_hash_fragment() {
+        let tmp = tempdir().expect("create temp dir");
+        let file = tmp.path().join("explicit.txt");
+        fs::write(
+            &file,
+            r#"
+@EXPLICIT
+# platform: linux-64
+https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2#deadbeef
+"#,
+        )
+        .expect("write explicit");
+
+        let parsed = parse_spec_file(&file).expect("parse explicit");
+        assert_eq!(parsed.kind, SpecFileKind::Explicit);
+        assert_eq!(
+            parsed.env.conda_specs,
+            vec![
+                "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2#deadbeef"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_rejects_empty_non_yaml_file() {
+        let tmp = tempdir().expect("create temp dir");
+        let file = tmp.path().join("specs.txt");
+        fs::write(&file, "  \n# comment only\n").expect("write empty-ish file");
+
+        let err = parse_spec_file(&file).expect_err("must reject empty file");
+        assert!(matches!(err, CoreError::InvalidEnvironmentFile(_)));
+        assert!(err.to_string().contains("got an empty file"));
     }
 }
