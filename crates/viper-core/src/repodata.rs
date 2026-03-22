@@ -16,7 +16,15 @@ pub struct RepoPackage {
     pub name: String,
     pub version: String,
     pub build: String,
+    pub build_number: i64,
+    pub subdir: String,
+    pub filename: String,
+    pub depends: Vec<String>,
+    pub constrains: Vec<String>,
+    pub md5: Option<String>,
+    pub sha256: Option<String>,
     pub channel: String,
+    pub base_url: String,
     pub url: String,
 }
 
@@ -25,6 +33,18 @@ struct RepodataRecord {
     name: String,
     version: String,
     build: String,
+    #[serde(default)]
+    build_number: i64,
+    #[serde(default)]
+    subdir: Option<String>,
+    #[serde(default)]
+    depends: Vec<String>,
+    #[serde(default)]
+    constrains: Vec<String>,
+    #[serde(default)]
+    md5: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -174,20 +194,38 @@ fn parse_repodata(raw: &str) -> Result<RepodataFile, CoreError> {
 fn parse_records(channel: &str, subdir: &str, repodata: RepodataFile) -> Vec<RepoPackage> {
     let mut out = Vec::new();
     for (filename, record) in repodata.packages {
+        let subdir = record.subdir.unwrap_or_else(|| subdir.to_string());
         out.push(RepoPackage {
             name: record.name,
             version: record.version,
             build: record.build,
+            build_number: record.build_number,
+            subdir: subdir.clone(),
+            filename: filename.clone(),
+            depends: record.depends,
+            constrains: record.constrains,
+            md5: record.md5,
+            sha256: record.sha256,
             channel: channel.to_string(),
+            base_url: channel.to_string(),
             url: format!("{channel}/{subdir}/{filename}"),
         });
     }
     for (filename, record) in repodata.packages_conda {
+        let subdir = record.subdir.unwrap_or_else(|| subdir.to_string());
         out.push(RepoPackage {
             name: record.name,
             version: record.version,
             build: record.build,
+            build_number: record.build_number,
+            subdir: subdir.clone(),
+            filename: filename.clone(),
+            depends: record.depends,
+            constrains: record.constrains,
+            md5: record.md5,
+            sha256: record.sha256,
             channel: channel.to_string(),
+            base_url: channel.to_string(),
             url: format!("{channel}/{subdir}/{filename}"),
         });
     }
@@ -323,6 +361,13 @@ fn now_epoch_s() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration as StdDuration;
     use tempfile::tempdir;
 
     #[test]
@@ -412,5 +457,411 @@ mod tests {
         let key = cache_name_from_url(url);
         assert_eq!(key.len(), 8);
         assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn parse_records_retains_dependency_hash_and_channel_metadata() {
+        let raw = r#"{
+            "packages": {
+                "python-3.12.2-h123_2.conda": {
+                    "name": "python",
+                    "version": "3.12.2",
+                    "build": "h123_2",
+                    "build_number": 2,
+                    "subdir": "linux-64",
+                    "depends": ["libffi >=3.4,<4.0a0", "openssl >=3.0.0"],
+                    "constrains": ["python_abi 3.12.* *_cp312"],
+                    "md5": "0123456789abcdef0123456789abcdef",
+                    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }
+        }"#;
+        let repodata = parse_repodata(raw).expect("parse repodata");
+        let packages = parse_records(
+            "https://conda.anaconda.org/conda-forge",
+            "linux-64",
+            repodata,
+        );
+        let pkg = packages.first().expect("one package");
+        assert_eq!(pkg.name, "python");
+        assert_eq!(pkg.build_number, 2);
+        assert_eq!(pkg.subdir, "linux-64");
+        assert_eq!(pkg.filename, "python-3.12.2-h123_2.conda");
+        assert_eq!(pkg.base_url, "https://conda.anaconda.org/conda-forge");
+        assert_eq!(pkg.depends.len(), 2);
+        assert_eq!(pkg.constrains.len(), 1);
+        assert!(pkg.md5.is_some());
+        assert!(pkg.sha256.is_some());
+    }
+
+    #[test]
+    fn first_online_fetch_writes_cache_json_and_state_files() {
+        let tmp = tempdir().expect("temp dir");
+        let cache_root = tmp.path().join("cache");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&request_count);
+        let server = TestServer::spawn(move |_path, _headers| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            TestResponse::json(
+                200,
+                r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+                vec![
+                    ("Cache-Control".to_string(), "max-age=300".to_string()),
+                    ("ETag".to_string(), "\"etag-v1\"".to_string()),
+                ],
+            )
+        });
+        let channel = format!("{}/conda-forge", server.base_url());
+
+        let packages = fetch_packages(
+            std::slice::from_ref(&channel),
+            "linux-64",
+            false,
+            &cache_root,
+            0,
+            "current_repodata.json",
+        )
+        .expect("online fetch");
+        assert!(packages.iter().any(|p| p.name == "python"));
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+
+        for subdir in ["linux-64", "noarch"] {
+            let paths = cache_paths(
+                &cache_root,
+                &format!("{channel}/{subdir}/current_repodata.json"),
+            );
+            assert!(paths.json.exists(), "missing json cache for {subdir}");
+            assert!(paths.meta.exists(), "missing state cache for {subdir}");
+        }
+    }
+
+    #[test]
+    fn fresh_ttl_cache_reuses_local_repodata_without_network() {
+        let tmp = tempdir().expect("temp dir");
+        let cache_root = tmp.path().join("cache");
+        let channel = "http://127.0.0.1:9/conda-forge";
+        seed_cache_for_both_subdirs(
+            &cache_root,
+            channel,
+            "current_repodata.json",
+            now_epoch_s(),
+            "max-age=3600",
+            r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+        );
+
+        let packages = fetch_packages(
+            &[channel.to_string()],
+            "linux-64",
+            false,
+            &cache_root,
+            1,
+            "current_repodata.json",
+        )
+        .expect("must use fresh cache");
+        assert!(packages.iter().any(|p| p.name == "python"));
+    }
+
+    #[test]
+    fn http_304_refreshes_cached_metadata_timestamp() {
+        let tmp = tempdir().expect("temp dir");
+        let cache_root = tmp.path().join("cache");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&request_count);
+        let server = TestServer::spawn(move |_path, headers| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            assert!(headers.contains_key("if-none-match"));
+            assert!(headers.contains_key("if-modified-since"));
+            TestResponse::empty(
+                304,
+                vec![
+                    ("Cache-Control".to_string(), "max-age=120".to_string()),
+                    ("ETag".to_string(), "\"etag-v2\"".to_string()),
+                    (
+                        "Last-Modified".to_string(),
+                        "Tue, 01 Jan 2030 00:00:00 GMT".to_string(),
+                    ),
+                ],
+            )
+        });
+        let channel = format!("{}/conda-forge", server.base_url());
+        seed_cache_for_both_subdirs(
+            &cache_root,
+            &channel,
+            "current_repodata.json",
+            1,
+            "max-age=0",
+            r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+        );
+        set_cache_http_headers(
+            &cache_root,
+            &channel,
+            "current_repodata.json",
+            "\"etag-v1\"",
+        );
+
+        let before = read_cached_meta(
+            &cache_paths(
+                &cache_root,
+                &format!("{channel}/linux-64/current_repodata.json"),
+            )
+            .meta,
+        )
+        .expect("cached meta")
+        .fetched_at_epoch_s;
+
+        let packages = fetch_packages(
+            std::slice::from_ref(&channel),
+            "linux-64",
+            false,
+            &cache_root,
+            0,
+            "current_repodata.json",
+        )
+        .expect("304 path should use cache");
+        assert!(packages.iter().any(|p| p.name == "python"));
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+
+        let after = read_cached_meta(
+            &cache_paths(
+                &cache_root,
+                &format!("{channel}/linux-64/current_repodata.json"),
+            )
+            .meta,
+        )
+        .expect("updated meta")
+        .fetched_at_epoch_s;
+        assert!(after >= before);
+    }
+
+    #[test]
+    fn remote_failure_falls_back_only_when_cache_exists() {
+        let server = TestServer::spawn(move |_path, _headers| {
+            TestResponse::empty(
+                503,
+                vec![("Cache-Control".to_string(), "max-age=0".to_string())],
+            )
+        });
+        let channel = format!("{}/conda-forge", server.base_url());
+
+        let tmp_with_cache = tempdir().expect("temp dir");
+        let cache_with = tmp_with_cache.path().join("cache");
+        seed_cache_for_both_subdirs(
+            &cache_with,
+            &channel,
+            "current_repodata.json",
+            1,
+            "max-age=0",
+            r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+        );
+        let fallback = fetch_packages(
+            std::slice::from_ref(&channel),
+            "linux-64",
+            false,
+            &cache_with,
+            0,
+            "current_repodata.json",
+        )
+        .expect("fallback to cache on 5xx");
+        assert!(fallback.iter().any(|p| p.name == "python"));
+
+        let tmp_without_cache = tempdir().expect("temp dir");
+        let err = fetch_packages(
+            &[channel],
+            "linux-64",
+            false,
+            &tmp_without_cache.path().join("cache"),
+            0,
+            "current_repodata.json",
+        )
+        .expect_err("must fail without cache");
+        match err {
+            CoreError::Network(msg) => assert!(msg.contains("503")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    fn seed_cache_for_both_subdirs(
+        cache_root: &Path,
+        channel: &str,
+        repodata_filename: &str,
+        fetched_at_epoch_s: u64,
+        cache_control: &str,
+        body: &str,
+    ) {
+        fs::create_dir_all(cache_root).expect("create cache root");
+        for subdir in ["linux-64", "noarch"] {
+            let paths = cache_paths(
+                cache_root,
+                &format!("{channel}/{subdir}/{repodata_filename}"),
+            );
+            fs::write(&paths.json, body).expect("write repodata json");
+            write_meta(
+                &paths.meta,
+                &CacheMeta {
+                    fetched_at_epoch_s,
+                    cache_control: Some(cache_control.to_string()),
+                    etag: None,
+                    last_modified: None,
+                    url: Some(format!("{channel}/{subdir}/{repodata_filename}")),
+                },
+            )
+            .expect("write repodata state");
+        }
+    }
+
+    fn set_cache_http_headers(
+        cache_root: &Path,
+        channel: &str,
+        repodata_filename: &str,
+        etag: &str,
+    ) {
+        for subdir in ["linux-64", "noarch"] {
+            let paths = cache_paths(
+                cache_root,
+                &format!("{channel}/{subdir}/{repodata_filename}"),
+            );
+            let mut meta = read_cached_meta(&paths.meta).expect("existing meta");
+            meta.etag = Some(etag.to_string());
+            meta.last_modified = Some("Mon, 01 Jan 2024 00:00:00 GMT".to_string());
+            write_meta(&paths.meta, &meta).expect("write updated state");
+        }
+    }
+
+    struct TestResponse {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl TestResponse {
+        fn json(status: u16, body: &str, headers: Vec<(String, String)>) -> Self {
+            let mut all_headers = headers;
+            all_headers.push(("Content-Type".to_string(), "application/json".to_string()));
+            Self {
+                status,
+                headers: all_headers,
+                body: body.to_string(),
+            }
+        }
+
+        fn empty(status: u16, headers: Vec<(String, String)>) -> Self {
+            Self {
+                status,
+                headers,
+                body: String::new(),
+            }
+        }
+    }
+
+    struct TestServer {
+        addr: String,
+        shutdown: Arc<AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl TestServer {
+        fn spawn<F>(handler: F) -> Self
+        where
+            F: Fn(String, BTreeMap<String, String>) -> TestResponse + Send + Sync + 'static,
+        {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind test server");
+            listener
+                .set_nonblocking(true)
+                .expect("set nonblocking listener");
+            let addr = format!("http://{}", listener.local_addr().expect("local addr"));
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let shutdown_flag = Arc::clone(&shutdown);
+            let handler = Arc::new(handler);
+            let thread_handler = Arc::clone(&handler);
+            let join = thread::spawn(move || {
+                while !shutdown_flag.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            handle_connection(stream, &thread_handler);
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(StdDuration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                addr,
+                shutdown,
+                handle: Some(join),
+            }
+        }
+
+        fn base_url(&self) -> &str {
+            &self.addr
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(self.addr.trim_start_matches("http://"));
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn handle_connection<F>(mut stream: TcpStream, handler: &Arc<F>)
+    where
+        F: Fn(String, BTreeMap<String, String>) -> TestResponse + Send + Sync + 'static,
+    {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(1)))
+            .expect("set read timeout");
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    request.extend_from_slice(&buf[..n]);
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => return,
+            }
+        }
+        let req_text = String::from_utf8_lossy(&request);
+        let mut lines = req_text.lines();
+        let first = lines.next().unwrap_or_default();
+        let path = first.split_whitespace().nth(1).unwrap_or("/").to_string();
+        let mut headers = BTreeMap::new();
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            }
+        }
+        let resp = handler(path, headers);
+        let status_text = match resp.status {
+            200 => "OK",
+            304 => "Not Modified",
+            503 => "Service Unavailable",
+            _ => "Status",
+        };
+        let mut raw = format!(
+            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            resp.status,
+            status_text,
+            resp.body.len()
+        );
+        for (name, value) in resp.headers {
+            raw.push_str(&format!("{name}: {value}\r\n"));
+        }
+        raw.push_str("\r\n");
+        raw.push_str(&resp.body);
+        let _ = stream.write_all(raw.as_bytes());
     }
 }

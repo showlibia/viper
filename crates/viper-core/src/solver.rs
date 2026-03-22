@@ -156,7 +156,15 @@ mod tests {
             name: name.to_string(),
             version: version.to_string(),
             build: build.to_string(),
+            build_number: 0,
+            subdir: subdir.to_string(),
+            filename: format!("{name}-{version}-{build}.conda"),
+            depends: Vec::new(),
+            constrains: Vec::new(),
+            md5: None,
+            sha256: None,
             channel: channel.to_string(),
+            base_url: channel.to_string(),
             url: format!("{channel}/{subdir}/{name}-{version}-{build}.conda"),
         }
     }

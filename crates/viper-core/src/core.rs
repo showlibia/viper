@@ -32,13 +32,13 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
 
     match op {
         CliOperation::Create { specs, files } => {
-            let mut normalized =
-                normalize_request_inputs(specs, files, &config.channels, &globals.channels)?;
-            maybe_warn_cli_name_override(
+            let normalized = normalize_request_inputs(
+                specs,
+                files,
+                &config.channels,
+                &globals.channels,
                 globals.name.as_deref(),
-                normalized.yaml_name.as_deref(),
-                &mut normalized.warnings,
-            );
+            )?;
             let target_prefix = resolve_create_target_prefix(
                 &globals,
                 &config.root_prefix,
@@ -118,13 +118,13 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 ));
             }
 
-            let mut normalized =
-                normalize_request_inputs(specs, files, &config.channels, &globals.channels)?;
-            maybe_warn_cli_name_override(
+            let normalized = normalize_request_inputs(
+                specs,
+                files,
+                &config.channels,
+                &globals.channels,
                 globals.name.as_deref(),
-                normalized.yaml_name.as_deref(),
-                &mut normalized.warnings,
-            );
+            )?;
             let repodata_filename = select_repodata_filename(&normalized.conda_specs);
             let repodata = if normalized.conda_specs.is_empty() {
                 Vec::new()
@@ -325,6 +325,7 @@ fn normalize_request_inputs(
     files: Vec<std::path::PathBuf>,
     base_channels: &[String],
     cli_channels: &[String],
+    cli_name: Option<&str>,
 ) -> Result<NormalizedRequestInputs, CoreError> {
     let mut conda_specs = cli_specs;
     let mut pip_specs = Vec::new();
@@ -362,6 +363,8 @@ fn normalize_request_inputs(
                 .map(ToOwned::to_owned);
         }
     }
+
+    maybe_warn_cli_name_override(cli_name, yaml_name.as_deref(), &mut warnings);
 
     Ok(NormalizedRequestInputs {
         conda_specs,
