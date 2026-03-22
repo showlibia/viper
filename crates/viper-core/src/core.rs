@@ -295,7 +295,15 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let removed = if force {
                 state.force_remove_specs(&specs)?
             } else {
-                state.remove_specs(&specs, !no_prune_deps)?
+                let mut keep_requested = EnvironmentState::requested_specs_map(&target_prefix)?
+                    .into_keys()
+                    .collect::<HashSet<_>>();
+                for spec in &specs {
+                    if let Ok(name) = crate::spec::package_name_from_spec(spec) {
+                        keep_requested.remove(&name);
+                    }
+                }
+                state.remove_specs(&specs, !no_prune_deps, &keep_requested)?
             };
             let removed_names = removed
                 .iter()

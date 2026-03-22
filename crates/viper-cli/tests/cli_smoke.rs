@@ -642,6 +642,68 @@ fn remove_force_keeps_dependents_in_unsafe_mode() {
 }
 
 #[test]
+fn remove_default_prune_keeps_explicitly_requested_dependency() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache_with_options(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[
+            PackageSeed::new("python", "3.12.0", "0").depends(&["openssl >=3.0"]),
+            PackageSeed::new("openssl", "3.0.13", "0"),
+        ],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "openssl",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(!names.iter().any(|name| name == "python"));
+    assert!(names.iter().any(|name| name == "openssl"));
+}
+
+#[test]
 fn list_explicit_uses_record_hashes() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");

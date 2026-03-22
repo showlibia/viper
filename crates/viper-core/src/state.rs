@@ -244,6 +244,7 @@ impl EnvironmentState {
         &mut self,
         specs: &[String],
         prune_dependencies: bool,
+        keep_requested: &HashSet<String>,
     ) -> Result<Vec<PlannedUnlink>, CoreError> {
         let mut names = HashSet::with_capacity(specs.len());
         for spec in specs {
@@ -291,6 +292,9 @@ impl EnvironmentState {
             }
             while let Some(candidate) = prune_queue.pop() {
                 if names.contains(&candidate) {
+                    continue;
+                }
+                if keep_requested.contains(&candidate) {
                     continue;
                 }
 
@@ -341,6 +345,39 @@ impl EnvironmentState {
 
         self.packages.retain(|p| !names.contains(&p.name));
         Ok(removed)
+    }
+
+    pub fn requested_specs_map(prefix: &Path) -> Result<HashMap<String, String>, CoreError> {
+        let history = fs::read_to_string(history_path(prefix)).unwrap_or_default();
+        let mut requested = HashMap::new();
+
+        for line in history.lines() {
+            let Some(comment) = line.strip_prefix("# ") else {
+                continue;
+            };
+            let Some((action, raw_specs)) = comment.split_once(" specs: ") else {
+                continue;
+            };
+            let specs = serde_json::from_str::<Vec<String>>(raw_specs).unwrap_or_default();
+            match action.trim() {
+                "create" | "install" | "update" => {
+                    for spec in specs {
+                        if let Ok(name) = package_name_from_spec(&spec) {
+                            requested.insert(name, spec);
+                        }
+                    }
+                }
+                "remove" | "uninstall" => {
+                    for spec in specs {
+                        if let Ok(name) = package_name_from_spec(&spec) {
+                            requested.remove(&name);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(requested)
     }
 
     pub fn force_remove_specs(
