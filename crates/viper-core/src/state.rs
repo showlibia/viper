@@ -11,7 +11,7 @@ use crate::types::PackageRecord;
 
 const HISTORY_FILE: &str = "history";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EnvironmentState {
     pub packages: Vec<PackageRecord>,
 }

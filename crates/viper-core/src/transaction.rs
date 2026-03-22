@@ -1,7 +1,11 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::error::CoreError;
+use crate::state::{EnvironmentState, ensure_prefix_layout};
 use crate::types::PackageRecord;
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,4 +100,160 @@ impl TransactionPlan {
             unlink,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct TransactionExecutor {
+    pub operation: String,
+    pub requested_specs: Vec<String>,
+    pub pip_specs: Vec<String>,
+    pub platform: String,
+    pub dry_run: bool,
+    pub ensure_layout: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransactionOutcome {
+    pub state: EnvironmentState,
+    pub linked: usize,
+    pub unlinked: usize,
+    pub pip_changed: usize,
+}
+
+impl TransactionExecutor {
+    pub fn apply(
+        &self,
+        prefix: &Path,
+        mut state: EnvironmentState,
+        plan: &TransactionPlan,
+    ) -> Result<TransactionOutcome, CoreError> {
+        let unlinked = state.remove_conda_unlinks(&plan.unlink);
+        let linked =
+            state.install_conda_links(&plan.link, &self.requested_specs, &self.platform)?;
+        let pip_changed = state.install_pip_specs(&self.pip_specs, &self.platform)?;
+
+        if self.dry_run {
+            return Ok(TransactionOutcome {
+                state,
+                linked,
+                unlinked,
+                pip_changed,
+            });
+        }
+
+        let snapshot = PrefixSnapshot::capture(prefix)?;
+        if self.ensure_layout {
+            ensure_prefix_layout(prefix)?;
+        }
+
+        if should_fail("before_persist") {
+            PrefixSnapshot::restore(prefix, &snapshot)?;
+            return Err(CoreError::TransactionFailed(
+                "injected failure before persist".to_string(),
+            ));
+        }
+
+        state.persist(prefix)?;
+        if should_fail("after_persist") {
+            PrefixSnapshot::restore(prefix, &snapshot)?;
+            return Err(CoreError::TransactionFailed(
+                "injected failure after persist".to_string(),
+            ));
+        }
+
+        let removed = plan
+            .unlink
+            .iter()
+            .map(|item| item.dist_name.clone())
+            .collect::<Vec<_>>();
+        EnvironmentState::append_history(
+            prefix,
+            &self.operation,
+            &self.requested_specs,
+            &plan.link,
+            &removed,
+        )?;
+        if should_fail("after_history") {
+            PrefixSnapshot::restore(prefix, &snapshot)?;
+            return Err(CoreError::TransactionFailed(
+                "injected failure after history".to_string(),
+            ));
+        }
+
+        Ok(TransactionOutcome {
+            state,
+            linked,
+            unlinked,
+            pip_changed,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PrefixSnapshot {
+    MissingPrefix,
+    Existing { files: Vec<(PathBuf, Vec<u8>)> },
+}
+
+impl PrefixSnapshot {
+    fn capture(prefix: &Path) -> Result<Self, CoreError> {
+        if !prefix.exists() {
+            return Ok(Self::MissingPrefix);
+        }
+        let mut files = Vec::new();
+        let meta_dir = prefix.join("conda-meta");
+        if meta_dir.exists() {
+            for entry in fs::read_dir(&meta_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(prefix)
+                    .map_err(|e| CoreError::TransactionFailed(e.to_string()))?
+                    .to_path_buf();
+                files.push((rel, fs::read(&path)?));
+            }
+        }
+        Ok(Self::Existing { files })
+    }
+
+    fn restore(prefix: &Path, snapshot: &Self) -> Result<(), CoreError> {
+        match snapshot {
+            Self::MissingPrefix => {
+                if prefix.exists() {
+                    fs::remove_dir_all(prefix)?;
+                }
+                Ok(())
+            }
+            Self::Existing { files } => {
+                let meta_dir = prefix.join("conda-meta");
+                fs::create_dir_all(&meta_dir)?;
+                if meta_dir.exists() {
+                    for entry in fs::read_dir(&meta_dir)? {
+                        let entry = entry?;
+                        let path = entry.path();
+                        if path.is_file() {
+                            fs::remove_file(path)?;
+                        }
+                    }
+                }
+                for (rel, content) in files {
+                    let path = prefix.join(rel);
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(path, content)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn should_fail(stage: &str) -> bool {
+    std::env::var("VIPER_TX_FAIL_POINT")
+        .ok()
+        .is_some_and(|configured| configured == stage)
 }

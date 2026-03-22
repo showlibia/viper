@@ -9,8 +9,8 @@ use crate::error::CoreError;
 use crate::repodata::{RepoPackage, fetch_packages};
 use crate::solver::{SolveOptions, solve_to_actions, spec_requires_full_repodata};
 use crate::spec::parse_env_file;
-use crate::state::{EnvironmentState, ensure_prefix_layout, is_managed_prefix};
-use crate::transaction::TransactionPlan;
+use crate::state::{EnvironmentState, is_managed_prefix};
+use crate::transaction::{TransactionExecutor, TransactionPlan};
 use crate::types::{
     CliConfigCommand, CliOperation, ListOptions, OperationRequest, OperationResult, PackageRecord,
 };
@@ -94,27 +94,15 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 }
             }));
 
-            let mut state = EnvironmentState::empty();
-            let changed =
-                state.install_conda_links(&conda_plan.link, &normalized.conda_specs, &platform)?;
-            let pip_changed = state.install_pip_specs(&normalized.pip_specs, &platform)?;
-
-            if !config.dry_run {
-                ensure_prefix_layout(&target_prefix)?;
-                state.persist(&target_prefix)?;
-                let removed = conda_plan
-                    .unlink
-                    .iter()
-                    .map(|item| item.dist_name.clone())
-                    .collect::<Vec<_>>();
-                EnvironmentState::append_history(
-                    &target_prefix,
-                    "create",
-                    &normalized.conda_specs,
-                    &conda_plan.link,
-                    &removed,
-                )?;
-            }
+            let tx = TransactionExecutor {
+                operation: "create".to_string(),
+                requested_specs: normalized.conda_specs.clone(),
+                pip_specs: normalized.pip_specs.clone(),
+                platform: platform.clone(),
+                dry_run: config.dry_run,
+                ensure_layout: true,
+            };
+            let outcome = tx.apply(&target_prefix, EnvironmentState::empty(), &conda_plan)?;
 
             let mut result = OperationResult::ok(
                 "environment created",
@@ -124,7 +112,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "channels": normalized.channels,
                     "specs": normalized.conda_specs,
                     "pip_specs": normalized.pip_specs,
-                    "changed": changed + pip_changed,
+                    "changed": outcome.linked + outcome.unlinked + outcome.pip_changed,
                     "actions": {
                         "link": link_actions,
                     },
@@ -158,7 +146,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 &globals.channels,
                 globals.name.as_deref(),
             )?;
-            let mut state = EnvironmentState::load(&target_prefix)?;
+            let state = EnvironmentState::load(&target_prefix)?;
             let mut solve_specs = state.conda_locked_specs();
             solve_specs.extend(normalized.conda_specs.clone());
             let solve_specs = dedup_specs(solve_specs);
@@ -213,32 +201,21 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 }
             }));
 
-            let removed_count = state.remove_conda_unlinks(&conda_plan.unlink);
-            let linked_count =
-                state.install_conda_links(&conda_plan.link, &normalized.conda_specs, &platform)?;
-            let pip_changed = state.install_pip_specs(&normalized.pip_specs, &platform)?;
-
-            if !config.dry_run {
-                state.persist(&target_prefix)?;
-                let removed = conda_plan
-                    .unlink
-                    .iter()
-                    .map(|item| item.dist_name.clone())
-                    .collect::<Vec<_>>();
-                EnvironmentState::append_history(
-                    &target_prefix,
-                    "install",
-                    &normalized.conda_specs,
-                    &conda_plan.link,
-                    &removed,
-                )?;
-            }
+            let tx = TransactionExecutor {
+                operation: "install".to_string(),
+                requested_specs: normalized.conda_specs.clone(),
+                pip_specs: normalized.pip_specs.clone(),
+                platform: platform.clone(),
+                dry_run: config.dry_run,
+                ensure_layout: false,
+            };
+            let outcome = tx.apply(&target_prefix, state, &conda_plan)?;
 
             let mut result = OperationResult::ok(
                 "packages installed",
                 json!({
                     "target_prefix": target_prefix,
-                    "changed": linked_count + removed_count + pip_changed,
+                    "changed": outcome.linked + outcome.unlinked + outcome.pip_changed,
                     "specs": normalized.conda_specs,
                     "pip_specs": normalized.pip_specs,
                     "actions": {
@@ -287,9 +264,10 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 ));
             }
 
-            let mut state = EnvironmentState::load(&target_prefix)?;
+            let state = EnvironmentState::load(&target_prefix)?;
+            let mut preview = state.clone();
             let removed = if force {
-                state.force_remove_specs(&specs)?
+                preview.force_remove_specs(&specs)?
             } else {
                 let mut keep_requested = EnvironmentState::requested_specs_map(&target_prefix)?
                     .into_keys()
@@ -299,26 +277,27 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         keep_requested.remove(&name);
                     }
                 }
-                state.remove_specs(&specs, !no_prune_deps, &keep_requested)?
+                preview.remove_specs(&specs, !no_prune_deps, &keep_requested)?
             };
+            let remove_plan = TransactionPlan {
+                fetch: Vec::new(),
+                extract: Vec::new(),
+                link: Vec::new(),
+                unlink: removed.clone(),
+            };
+            let tx = TransactionExecutor {
+                operation: "remove".to_string(),
+                requested_specs: specs.clone(),
+                pip_specs: Vec::new(),
+                platform: current_platform_subdir(),
+                dry_run: config.dry_run,
+                ensure_layout: false,
+            };
+            let _outcome = tx.apply(&target_prefix, state, &remove_plan)?;
             let removed_names = removed
                 .iter()
                 .map(|item| item.name.clone())
                 .collect::<Vec<_>>();
-            if !config.dry_run {
-                state.persist(&target_prefix)?;
-                let removed_dist = removed
-                    .iter()
-                    .map(|item| item.dist_name.clone())
-                    .collect::<Vec<_>>();
-                EnvironmentState::append_history(
-                    &target_prefix,
-                    "remove",
-                    &specs,
-                    &[],
-                    &removed_dist,
-                )?;
-            }
 
             Ok(OperationResult::ok(
                 "packages removed",

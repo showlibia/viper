@@ -32,6 +32,8 @@ pub enum CoreError {
     InvalidListOptions(String),
     #[error("package '{0}' is not installed")]
     PackageNotInstalled(String),
+    #[error("transaction failed: {0}")]
+    TransactionFailed(String),
     #[error("config key '{0}' is not supported")]
     UnsupportedConfigKey(String),
     #[error("io error: {0}")]
