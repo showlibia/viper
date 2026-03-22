@@ -8,7 +8,9 @@ use crate::config::{ConfigInput, ConfigStore, build_config};
 use crate::error::CoreError;
 use crate::repodata::{RepoPackage, fetch_packages};
 use crate::solver::{SolveOptions, solve_to_actions, spec_requires_full_repodata};
-use crate::spec::parse_env_file;
+use crate::spec::{
+    SpecFileKind, normalize_spec, package_name_from_spec, parse_match_spec, parse_spec_file,
+};
 use crate::state::{EnvironmentState, is_managed_prefix};
 use crate::transaction::{TransactionExecutor, TransactionPlan};
 use crate::types::{
@@ -264,6 +266,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 ));
             }
 
+            let specs = normalize_and_validate_match_specs(specs)?;
             let state = EnvironmentState::load(&target_prefix)?;
             let mut preview = state.clone();
             let removed = if force {
@@ -273,9 +276,8 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     .into_keys()
                     .collect::<HashSet<_>>();
                 for spec in &specs {
-                    if let Ok(name) = crate::spec::package_name_from_spec(spec) {
-                        keep_requested.remove(&name);
-                    }
+                    let name = package_name_from_spec(spec)?;
+                    keep_requested.remove(&name);
                 }
                 preview.remove_specs(&specs, !no_prune_deps, &keep_requested)?
             };
@@ -437,20 +439,33 @@ fn normalize_request_inputs(
     cli_channels: &[String],
     cli_name: Option<&str>,
 ) -> Result<NormalizedRequestInputs, CoreError> {
-    let mut conda_specs = cli_specs;
+    let mut conda_specs = normalize_and_validate_match_specs(cli_specs)?;
     let mut pip_specs = Vec::new();
     let mut yaml_name = None;
     let mut yaml_file_stem = None;
     let mut yaml_channels = Vec::new();
     let mut warnings = Vec::new();
+    let mut file_kind: Option<SpecFileKind> = None;
 
     for path in files {
-        let parsed = parse_env_file(&path)?;
-        conda_specs.extend(parsed.conda_specs);
-        pip_specs.extend(parsed.pip_specs);
-        yaml_channels.extend(parsed.channels);
+        let parsed = parse_spec_file(&path)?;
+        if let Some(kind) = file_kind {
+            if kind != parsed.kind {
+                return Err(CoreError::InvalidEnvironmentFile(format!(
+                    "all --file inputs must have the same format, got mixed {:?} and {:?}",
+                    kind, parsed.kind
+                )));
+            }
+        } else {
+            file_kind = Some(parsed.kind);
+        }
 
-        if let Some(name) = parsed.name {
+        let env = parsed.env;
+        conda_specs.extend(env.conda_specs);
+        pip_specs.extend(env.pip_specs);
+        yaml_channels.extend(env.channels);
+
+        if let Some(name) = env.name {
             match yaml_name.as_ref() {
                 Some(existing) if existing != &name => {
                     warnings.push(format!(
@@ -475,6 +490,9 @@ fn normalize_request_inputs(
     }
 
     maybe_warn_cli_name_override(cli_name, yaml_name.as_deref(), &mut warnings);
+    for spec in &conda_specs {
+        parse_match_spec(spec)?;
+    }
 
     Ok(NormalizedRequestInputs {
         conda_specs,
@@ -484,6 +502,17 @@ fn normalize_request_inputs(
         channels: effective_channels(base_channels, cli_channels, &yaml_channels),
         warnings,
     })
+}
+
+fn normalize_and_validate_match_specs(specs: Vec<String>) -> Result<Vec<String>, CoreError> {
+    specs
+        .into_iter()
+        .map(|spec| {
+            let normalized = normalize_spec(&spec)?;
+            parse_match_spec(&normalized)?;
+            Ok(normalized)
+        })
+        .collect()
 }
 
 fn resolve_create_target_prefix(

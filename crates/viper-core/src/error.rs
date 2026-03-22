@@ -16,6 +16,8 @@ pub enum CoreError {
     NotManagedPrefix(String),
     #[error("package specification is empty")]
     EmptySpec,
+    #[error("invalid package specification: {0}")]
+    InvalidSpec(String),
     #[error("unsupported environment file format")]
     UnsupportedEnvironmentFile,
     #[error("invalid environment file: {0}")]

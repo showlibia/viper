@@ -107,6 +107,132 @@ fn create_install_list_remove_roundtrip() {
 }
 
 #[test]
+fn create_invalid_spec_fails() {
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("env");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .args([
+            "--no-rc",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "!bad",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("invalid package specification"))
+    );
+}
+
+#[test]
+fn install_invalid_spec_fails() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    let output = install
+        .args([
+            "--no-rc",
+            "install",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "!bad",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("invalid package specification"))
+    );
+}
+
+#[test]
+fn remove_invalid_spec_fails() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "!bad",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("invalid package specification"))
+    );
+}
+
+#[test]
 fn config_set_get_and_info() {
     let tmp_home = tempdir().expect("create temp home");
     let mut config_set = Command::cargo_bin("viper").expect("binary exists");
@@ -1546,6 +1672,131 @@ dependencies:
 }
 
 #[test]
+fn create_merges_multiple_classic_spec_files() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let spec_a = tmp.path().join("a.txt");
+    let spec_b = tmp.path().join("b.txt");
+    fs::write(&spec_a, "python>=3.11\n").expect("write classic spec a");
+    fs::write(&spec_b, "numpy\n").expect("write classic spec b");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            spec_a.to_str().expect("utf8"),
+            "-f",
+            spec_b.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(names.iter().any(|name| name == "numpy"));
+}
+
+#[test]
+fn create_merges_multiple_explicit_files() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let subdir = current_platform_subdir();
+    let explicit_a = tmp.path().join("a.explicit");
+    let explicit_b = tmp.path().join("b.explicit");
+    fs::write(
+        &explicit_a,
+        format!(
+            "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2\n"
+        ),
+    )
+    .expect("write explicit a");
+    fs::write(
+        &explicit_b,
+        format!(
+            "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/numpy-2.0.0-0.tar.bz2\n"
+        ),
+    )
+    .expect("write explicit b");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            explicit_a.to_str().expect("utf8"),
+            "-f",
+            explicit_b.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(names.iter().any(|name| name == "numpy"));
+}
+
+#[test]
+fn create_rejects_mixed_file_spec_types() {
+    let tmp = tempdir().expect("create temp dir");
+    let spec_yaml = tmp.path().join("env.yaml");
+    let spec_classic = tmp.path().join("specs.txt");
+    fs::write(&spec_yaml, "dependencies:\n  - python\n").expect("write yaml");
+    fs::write(&spec_classic, "numpy\n").expect("write classic");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .args([
+            "--no-rc",
+            "create",
+            "-n",
+            "mix",
+            "-f",
+            spec_yaml.to_str().expect("utf8"),
+            "-f",
+            spec_classic.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("all --file inputs must have the same format"))
+    );
+}
+
+#[test]
 fn create_multiple_env_files_keep_first_name_and_warn() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
@@ -2504,21 +2755,23 @@ fn seed_repodata_cache_with_options(home: &Path, channels: &[&str], packages: &[
 
     for channel in channels {
         for subdir in [current_platform_subdir(), "noarch".to_string()] {
-            let key =
-                cache_name_from_repodata_url(&format!("{channel}/{subdir}/current_repodata.json"));
-            fs::write(
-                cache_root.join(format!("{key}.json")),
-                serde_json::to_string(&repodata_body).expect("serialize repodata"),
-            )
-            .expect("write repodata cache");
-            fs::write(
-                cache_root.join(format!("{key}.state.json")),
-                format!(
-                    "{{\"fetched_at_epoch_s\":{},\"cache_control\":\"max-age=3600\"}}",
-                    4_102_444_800u64
-                ),
-            )
-            .expect("write repodata state");
+            for repodata_name in ["current_repodata.json", "repodata.json"] {
+                let key =
+                    cache_name_from_repodata_url(&format!("{channel}/{subdir}/{repodata_name}"));
+                fs::write(
+                    cache_root.join(format!("{key}.json")),
+                    serde_json::to_string(&repodata_body).expect("serialize repodata"),
+                )
+                .expect("write repodata cache");
+                fs::write(
+                    cache_root.join(format!("{key}.state.json")),
+                    format!(
+                        "{{\"fetched_at_epoch_s\":{},\"cache_control\":\"max-age=3600\"}}",
+                        4_102_444_800u64
+                    ),
+                )
+                .expect("write repodata state");
+            }
         }
     }
 }

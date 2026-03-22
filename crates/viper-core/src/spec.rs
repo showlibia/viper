@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use rattler_conda_types::MatchSpec;
 use serde::Deserialize;
 
 use crate::error::CoreError;
@@ -20,12 +21,32 @@ pub struct EnvSpecFile {
     pub pip_specs: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecFileKind {
+    Yaml,
+    Classic,
+    Explicit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedSpecFile {
+    pub kind: SpecFileKind,
+    pub env: EnvSpecFile,
+}
+
 pub fn normalize_spec(spec: &str) -> Result<String, CoreError> {
     let trimmed = spec.trim();
     if trimmed.is_empty() {
         return Err(CoreError::EmptySpec);
     }
     Ok(trimmed.to_string())
+}
+
+pub fn parse_match_spec(spec: &str) -> Result<MatchSpec, CoreError> {
+    let normalized = normalize_spec(spec)?;
+    normalized
+        .parse::<MatchSpec>()
+        .map_err(|err| CoreError::InvalidSpec(format!("{normalized}: {err}")))
 }
 
 pub fn package_name_from_spec(spec: &str) -> Result<String, CoreError> {
@@ -120,6 +141,102 @@ pub fn parse_env_file(path: &Path) -> Result<EnvSpecFile, CoreError> {
     })
 }
 
+pub fn parse_spec_file(path: &Path) -> Result<ParsedSpecFile, CoreError> {
+    let ext = path
+        .extension()
+        .and_then(|x| x.to_str())
+        .unwrap_or_default();
+    if matches!(ext, "yml" | "yaml") {
+        let env = parse_env_file(path)?;
+        return Ok(ParsedSpecFile {
+            kind: SpecFileKind::Yaml,
+            env,
+        });
+    }
+
+    let content = fs::read_to_string(path)?;
+    let lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Ok(ParsedSpecFile {
+            kind: SpecFileKind::Classic,
+            env: EnvSpecFile {
+                name: None,
+                channels: Vec::new(),
+                conda_specs: Vec::new(),
+                pip_specs: Vec::new(),
+            },
+        });
+    }
+
+    if lines[0].eq_ignore_ascii_case("@EXPLICIT") {
+        let mut conda_specs = Vec::new();
+        for line in lines.into_iter().skip(1) {
+            let spec = explicit_url_to_spec(line)?;
+            parse_match_spec(&spec)?;
+            conda_specs.push(spec);
+        }
+        return Ok(ParsedSpecFile {
+            kind: SpecFileKind::Explicit,
+            env: EnvSpecFile {
+                name: None,
+                channels: Vec::new(),
+                conda_specs,
+                pip_specs: Vec::new(),
+            },
+        });
+    }
+
+    let mut conda_specs = Vec::new();
+    for line in lines {
+        let normalized = normalize_spec(line)?;
+        parse_match_spec(&normalized)?;
+        conda_specs.push(normalized);
+    }
+    Ok(ParsedSpecFile {
+        kind: SpecFileKind::Classic,
+        env: EnvSpecFile {
+            name: None,
+            channels: Vec::new(),
+            conda_specs,
+            pip_specs: Vec::new(),
+        },
+    })
+}
+
+fn explicit_url_to_spec(url: &str) -> Result<String, CoreError> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(CoreError::InvalidEnvironmentFile(format!(
+            "explicit entry must be a URL: {url}"
+        )));
+    }
+    let filename = url.rsplit('/').next().ok_or_else(|| {
+        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {url}"))
+    })?;
+    let stem = filename
+        .strip_suffix(".tar.bz2")
+        .or_else(|| filename.strip_suffix(".conda"))
+        .ok_or_else(|| {
+            CoreError::InvalidEnvironmentFile(format!(
+                "explicit entry must end with .tar.bz2 or .conda: {filename}"
+            ))
+        })?;
+    let mut parts = stem.rsplitn(3, '-');
+    let build = parts.next().ok_or_else(|| {
+        CoreError::InvalidEnvironmentFile(format!("explicit entry missing build: {filename}"))
+    })?;
+    let version = parts.next().ok_or_else(|| {
+        CoreError::InvalidEnvironmentFile(format!("explicit entry missing version: {filename}"))
+    })?;
+    let name = parts.next().ok_or_else(|| {
+        CoreError::InvalidEnvironmentFile(format!("explicit entry missing name: {filename}"))
+    })?;
+    Ok(format!("{name}={version}={build}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -131,6 +248,12 @@ mod tests {
     fn parse_name_from_spec() {
         let name = package_name_from_spec("python>=3.11").expect("valid spec");
         assert_eq!(name, "python");
+    }
+
+    #[test]
+    fn parse_match_spec_rejects_invalid_input() {
+        let err = parse_match_spec("!bad").expect_err("must reject invalid match spec");
+        assert!(matches!(err, CoreError::InvalidSpec(_)));
     }
 
     #[test]
@@ -286,5 +409,37 @@ dependencies:
             err.to_string()
                 .contains("environment name cannot contain path separators")
         );
+    }
+
+    #[test]
+    fn parse_spec_file_supports_classic_specs() {
+        let tmp = tempdir().expect("create temp dir");
+        let file = tmp.path().join("specs.txt");
+        fs::write(&file, "python>=3.11\nnumpy\n").expect("write specs");
+
+        let parsed = parse_spec_file(&file).expect("parse classic");
+        assert_eq!(parsed.kind, SpecFileKind::Classic);
+        assert_eq!(
+            parsed.env.conda_specs,
+            vec!["python>=3.11".to_string(), "numpy".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_supports_explicit_urls() {
+        let tmp = tempdir().expect("create temp dir");
+        let file = tmp.path().join("explicit.txt");
+        fs::write(
+            &file,
+            r#"
+@EXPLICIT
+https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2
+"#,
+        )
+        .expect("write explicit");
+
+        let parsed = parse_spec_file(&file).expect("parse explicit");
+        assert_eq!(parsed.kind, SpecFileKind::Explicit);
+        assert_eq!(parsed.env.conda_specs, vec!["python=3.12.0=0".to_string()]);
     }
 }

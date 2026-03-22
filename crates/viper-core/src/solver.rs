@@ -27,7 +27,7 @@ pub struct SolveResult {
 #[derive(Debug, Clone)]
 struct SpecConstraint {
     raw: String,
-    parsed: Option<MatchSpec>,
+    parsed: MatchSpec,
     required_by: Option<String>,
 }
 
@@ -51,8 +51,8 @@ pub fn solve_to_actions(
     };
 
     for spec in specs {
-        let parsed = spec.parse::<MatchSpec>().ok();
-        let name = requested_name(spec, parsed.as_ref());
+        let parsed = parse_constraint_spec(spec).map_err(|err| vec![err])?;
+        let name = requested_name(spec, &parsed);
         push_constraint(
             &mut state.constraints,
             name,
@@ -147,10 +147,19 @@ fn solve_recursive(
         let mut immediate_conflicts = Vec::new();
         for dep in &candidate.depends {
             let dep_name = package_name_from_spec(dep).unwrap_or_else(|_| dep.clone());
-            let dep_constraint = SpecConstraint {
-                raw: dep.clone(),
-                parsed: dep.parse::<MatchSpec>().ok(),
-                required_by: Some(format!("{}={}", candidate.name, candidate.version)),
+            let required_by = format!("{}={}", candidate.name, candidate.version);
+            let dep_constraint = match parse_constraint_spec(dep) {
+                Ok(parsed) => SpecConstraint {
+                    raw: dep.clone(),
+                    parsed,
+                    required_by: Some(required_by.clone()),
+                },
+                Err(err) => {
+                    immediate_conflicts.push(format!(
+                        "conflict: {required_by} has invalid dependency spec '{dep}': {err}"
+                    ));
+                    continue;
+                }
             };
             push_constraint(
                 &mut next_state.constraints,
@@ -264,7 +273,7 @@ fn compare_candidate_indexes(
 fn matches_all_constraints(constraints: &[SpecConstraint], candidate: &RepoPackage) -> bool {
     constraints
         .iter()
-        .all(|constraint| candidate_matches_spec(constraint.parsed.as_ref(), candidate))
+        .all(|constraint| candidate_matches_spec(&constraint.parsed, candidate))
 }
 
 fn explain_unsatisfied(name: &str, constraints: &[SpecConstraint]) -> Vec<String> {
@@ -316,14 +325,20 @@ fn package_dist_name(pkg: &RepoPackage) -> String {
     format!("{}-{}-{}", pkg.name, pkg.version, pkg.build)
 }
 
-fn requested_name(spec: &str, parsed: Option<&MatchSpec>) -> String {
+fn requested_name(spec: &str, parsed: &MatchSpec) -> String {
     if let Some(name) = parsed
-        .and_then(|ms| ms.name.as_exact())
+        .name
+        .as_exact()
         .map(|name| name.as_normalized().to_string())
     {
         return name;
     }
     package_name_from_spec(spec).unwrap_or_else(|_| spec.to_string())
+}
+
+fn parse_constraint_spec(spec: &str) -> Result<MatchSpec, String> {
+    spec.parse::<MatchSpec>()
+        .map_err(|err| format!("{spec}: {err}"))
 }
 
 pub fn spec_requires_full_repodata(spec: &str) -> bool {
@@ -389,11 +404,7 @@ fn normalize_channel(channel: &str) -> String {
     format!("https://conda.anaconda.org/{trimmed}")
 }
 
-fn candidate_matches_spec(spec: Option<&MatchSpec>, candidate: &RepoPackage) -> bool {
-    let Some(spec) = spec else {
-        return true;
-    };
-
+fn candidate_matches_spec(spec: &MatchSpec, candidate: &RepoPackage) -> bool {
     if let Some(version_spec) = spec.version.as_ref() {
         let Ok(version) = Version::from_str(&candidate.version) else {
             return false;
