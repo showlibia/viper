@@ -142,42 +142,46 @@ impl TransactionExecutor {
         }
 
         let snapshot = PrefixSnapshot::capture(prefix)?;
-        if self.ensure_layout {
-            ensure_prefix_layout(prefix)?;
-        }
+        let tx_result = (|| -> Result<(), CoreError> {
+            if self.ensure_layout {
+                ensure_prefix_layout(prefix)?;
+            }
 
-        if should_fail("before_persist") {
-            PrefixSnapshot::restore(prefix, &snapshot)?;
-            return Err(CoreError::TransactionFailed(
-                "injected failure before persist".to_string(),
-            ));
-        }
+            if should_fail("before_persist") {
+                return Err(CoreError::TransactionFailed(
+                    "injected failure before persist".to_string(),
+                ));
+            }
 
-        state.persist(prefix)?;
-        if should_fail("after_persist") {
-            PrefixSnapshot::restore(prefix, &snapshot)?;
-            return Err(CoreError::TransactionFailed(
-                "injected failure after persist".to_string(),
-            ));
-        }
+            state.persist(prefix)?;
+            if should_fail("after_persist") {
+                return Err(CoreError::TransactionFailed(
+                    "injected failure after persist".to_string(),
+                ));
+            }
 
-        let removed = plan
-            .unlink
-            .iter()
-            .map(|item| item.dist_name.clone())
-            .collect::<Vec<_>>();
-        EnvironmentState::append_history(
-            prefix,
-            &self.operation,
-            &self.requested_specs,
-            &plan.link,
-            &removed,
-        )?;
-        if should_fail("after_history") {
+            let removed = plan
+                .unlink
+                .iter()
+                .map(|item| item.dist_name.clone())
+                .collect::<Vec<_>>();
+            EnvironmentState::append_history(
+                prefix,
+                &self.operation,
+                &self.requested_specs,
+                &plan.link,
+                &removed,
+            )?;
+            if should_fail("after_history") {
+                return Err(CoreError::TransactionFailed(
+                    "injected failure after history".to_string(),
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(err) = tx_result {
             PrefixSnapshot::restore(prefix, &snapshot)?;
-            return Err(CoreError::TransactionFailed(
-                "injected failure after history".to_string(),
-            ));
+            return Err(err);
         }
 
         Ok(TransactionOutcome {
@@ -192,7 +196,13 @@ impl TransactionExecutor {
 #[derive(Debug, Clone)]
 enum PrefixSnapshot {
     MissingPrefix,
-    Existing { files: Vec<(PathBuf, Vec<u8>)> },
+    Existing { entries: Vec<SnapshotEntry> },
+}
+
+#[derive(Debug, Clone)]
+enum SnapshotEntry {
+    Dir(PathBuf),
+    File(PathBuf, Vec<u8>),
 }
 
 impl PrefixSnapshot {
@@ -200,23 +210,12 @@ impl PrefixSnapshot {
         if !prefix.exists() {
             return Ok(Self::MissingPrefix);
         }
-        let mut files = Vec::new();
+        let mut entries = Vec::new();
         let meta_dir = prefix.join("conda-meta");
         if meta_dir.exists() {
-            for entry in fs::read_dir(&meta_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let rel = path
-                    .strip_prefix(prefix)
-                    .map_err(|e| CoreError::TransactionFailed(e.to_string()))?
-                    .to_path_buf();
-                files.push((rel, fs::read(&path)?));
-            }
+            collect_entries(prefix, &meta_dir, &mut entries)?;
         }
-        Ok(Self::Existing { files })
+        Ok(Self::Existing { entries })
     }
 
     fn restore(prefix: &Path, snapshot: &Self) -> Result<(), CoreError> {
@@ -227,29 +226,67 @@ impl PrefixSnapshot {
                 }
                 Ok(())
             }
-            Self::Existing { files } => {
+            Self::Existing { entries } => {
                 let meta_dir = prefix.join("conda-meta");
-                fs::create_dir_all(&meta_dir)?;
                 if meta_dir.exists() {
-                    for entry in fs::read_dir(&meta_dir)? {
-                        let entry = entry?;
-                        let path = entry.path();
-                        if path.is_file() {
-                            fs::remove_file(path)?;
-                        }
-                    }
+                    fs::remove_dir_all(&meta_dir)?;
                 }
-                for (rel, content) in files {
-                    let path = prefix.join(rel);
-                    if let Some(parent) = path.parent() {
-                        fs::create_dir_all(parent)?;
+                fs::create_dir_all(&meta_dir)?;
+                let mut dirs = entries
+                    .iter()
+                    .filter_map(|entry| {
+                        if let SnapshotEntry::Dir(path) = entry {
+                            Some(path.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                dirs.sort_by_key(|path| path.components().count());
+                for rel in dirs {
+                    fs::create_dir_all(prefix.join(rel))?;
+                }
+                for entry in entries {
+                    if let SnapshotEntry::File(rel, content) = entry {
+                        let path = prefix.join(rel);
+                        if let Some(parent) = path.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        fs::write(path, content)?;
                     }
-                    fs::write(path, content)?;
                 }
                 Ok(())
             }
         }
     }
+}
+
+fn collect_entries(
+    prefix: &Path,
+    current: &Path,
+    out: &mut Vec<SnapshotEntry>,
+) -> Result<(), CoreError> {
+    let rel = current
+        .strip_prefix(prefix)
+        .map_err(|e| CoreError::TransactionFailed(e.to_string()))?
+        .to_path_buf();
+    out.push(SnapshotEntry::Dir(rel));
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_entries(prefix, &path, out)?;
+            continue;
+        }
+        if path.is_file() {
+            let rel = path
+                .strip_prefix(prefix)
+                .map_err(|e| CoreError::TransactionFailed(e.to_string()))?
+                .to_path_buf();
+            out.push(SnapshotEntry::File(rel, fs::read(&path)?));
+        }
+    }
+    Ok(())
 }
 
 fn should_fail(stage: &str) -> bool {
