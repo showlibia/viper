@@ -704,6 +704,77 @@ fn remove_default_prune_keeps_explicitly_requested_dependency() {
 }
 
 #[test]
+fn explicit_noop_install_persists_keep_spec_for_default_remove() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache_with_options(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[
+            PackageSeed::new("python", "3.12.0", "0").depends(&["openssl >=3.0"]),
+            PackageSeed::new("openssl", "3.0.13", "0"),
+        ],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    let output = install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "openssl",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["data"]["actions"]["link"], serde_json::json!([]));
+    assert_eq!(body["data"]["actions"]["unlink"], serde_json::json!([]));
+
+    let history = fs::read_to_string(prefix.join("conda-meta").join("history")).expect("history");
+    assert!(history.contains("# install specs: [\"openssl\"]"));
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "openssl"));
+    assert!(!names.iter().any(|name| name == "python"));
+}
+
+#[test]
 fn list_explicit_uses_record_hashes() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");

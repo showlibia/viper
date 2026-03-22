@@ -102,20 +102,18 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             if !config.dry_run {
                 ensure_prefix_layout(&target_prefix)?;
                 state.persist(&target_prefix)?;
-                if !conda_plan.link.is_empty() || !conda_plan.unlink.is_empty() {
-                    let removed = conda_plan
-                        .unlink
-                        .iter()
-                        .map(|item| item.dist_name.clone())
-                        .collect::<Vec<_>>();
-                    EnvironmentState::append_history(
-                        &target_prefix,
-                        "create",
-                        &normalized.conda_specs,
-                        &conda_plan.link,
-                        &removed,
-                    )?;
-                }
+                let removed = conda_plan
+                    .unlink
+                    .iter()
+                    .map(|item| item.dist_name.clone())
+                    .collect::<Vec<_>>();
+                EnvironmentState::append_history(
+                    &target_prefix,
+                    "create",
+                    &normalized.conda_specs,
+                    &conda_plan.link,
+                    &removed,
+                )?;
             }
 
             let mut result = OperationResult::ok(
@@ -222,20 +220,18 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
 
             if !config.dry_run {
                 state.persist(&target_prefix)?;
-                if !conda_plan.link.is_empty() || !conda_plan.unlink.is_empty() {
-                    let removed = conda_plan
-                        .unlink
-                        .iter()
-                        .map(|item| item.dist_name.clone())
-                        .collect::<Vec<_>>();
-                    EnvironmentState::append_history(
-                        &target_prefix,
-                        "install",
-                        &normalized.conda_specs,
-                        &conda_plan.link,
-                        &removed,
-                    )?;
-                }
+                let removed = conda_plan
+                    .unlink
+                    .iter()
+                    .map(|item| item.dist_name.clone())
+                    .collect::<Vec<_>>();
+                EnvironmentState::append_history(
+                    &target_prefix,
+                    "install",
+                    &normalized.conda_specs,
+                    &conda_plan.link,
+                    &removed,
+                )?;
             }
 
             let mut result = OperationResult::ok(
