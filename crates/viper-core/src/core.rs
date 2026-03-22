@@ -68,6 +68,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let solved = solve_to_actions(&normalized.conda_specs, &repodata, &solve_options)
                 .map_err(CoreError::UnsatisfiedSpecs)?;
             let conda_link_actions = solved.actions;
+            let platform = current_platform_subdir();
             let mut link_actions = conda_link_actions.clone();
             link_actions.extend(normalized.pip_specs.iter().map(|spec| {
                 crate::transaction::PlannedLink {
@@ -75,14 +76,20 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         .unwrap_or_else(|_| spec.clone()),
                     version: "unknown".to_string(),
                     build: "pip".to_string(),
+                    build_number: 0,
+                    dist_name: spec.clone(),
                     channel: "pypi".to_string(),
+                    base_url: "https://pypi.org".to_string(),
                     url: String::new(),
+                    md5: None,
+                    sha256: None,
+                    depends: Vec::new(),
+                    platform: platform.clone(),
                     source: "pip".to_string(),
                 }
             }));
 
             let mut state = EnvironmentState::empty();
-            let platform = current_platform_subdir();
             let changed = state.install_conda_links(
                 &conda_link_actions,
                 &normalized.conda_specs,
@@ -149,7 +156,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let solve_specs = dedup_specs(solve_specs);
 
             let repodata_filename = select_repodata_filename(&solve_specs);
-            let repodata = if normalized.conda_specs.is_empty() {
+            let repodata = if solve_specs.is_empty() {
                 Vec::new()
             } else {
                 fetch_packages(
@@ -168,6 +175,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
                 .map_err(CoreError::UnsatisfiedSpecs)?;
             let conda_link_actions = solved.actions;
+            let platform = current_platform_subdir();
             let mut link_actions = conda_link_actions.clone();
             link_actions.extend(normalized.pip_specs.iter().map(|spec| {
                 crate::transaction::PlannedLink {
@@ -175,13 +183,19 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         .unwrap_or_else(|_| spec.clone()),
                     version: "unknown".to_string(),
                     build: "pip".to_string(),
+                    build_number: 0,
+                    dist_name: spec.clone(),
                     channel: "pypi".to_string(),
+                    base_url: "https://pypi.org".to_string(),
                     url: String::new(),
+                    md5: None,
+                    sha256: None,
+                    depends: Vec::new(),
+                    platform: platform.clone(),
                     source: "pip".to_string(),
                 }
             }));
 
-            let platform = current_platform_subdir();
             let changed = state.install_conda_links(
                 &conda_link_actions,
                 &normalized.conda_specs,
@@ -248,17 +262,25 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
 
             let mut state = EnvironmentState::load(&target_prefix)?;
             let removed = state.remove_specs(&specs)?;
+            let removed_names = removed
+                .iter()
+                .map(|item| item.name.clone())
+                .collect::<Vec<_>>();
             if !config.dry_run {
                 state.persist(&target_prefix)?;
-                EnvironmentState::append_history(&target_prefix, "remove", &[], &specs)?;
+                EnvironmentState::append_history(&target_prefix, "remove", &[], &removed_names)?;
             }
 
             Ok(OperationResult::ok(
                 "packages removed",
                 json!({
                     "target_prefix": target_prefix,
-                    "removed": removed,
+                    "removed": removed.len(),
+                    "removed_names": removed_names,
                     "specs": specs,
+                    "actions": {
+                        "unlink": removed,
+                    },
                     "dry_run": config.dry_run,
                 }),
             ))
@@ -549,13 +571,15 @@ fn render_list_output(
             .map(|pkg| {
                 let mut line = package_url(pkg);
                 if options.md5 {
+                    if let Some(md5) = pkg.md5.as_deref() {
+                        line.push('#');
+                        line.push_str(md5);
+                    }
+                } else if options.sha256
+                    && let Some(sha256) = pkg.sha256.as_deref()
+                {
                     line.push('#');
-                    line.push_str("00000000000000000000000000000000");
-                } else if options.sha256 {
-                    line.push('#');
-                    line.push_str(
-                        "0000000000000000000000000000000000000000000000000000000000000000",
-                    );
+                    line.push_str(sha256);
                 }
                 line
             })
@@ -603,10 +627,15 @@ fn render_list_output(
                 "source": pkg.source,
                 "installed_at": pkg.installed_at,
                 "version": package_version(pkg),
+                "dist_name": pkg.dist_name.clone(),
                 "build_string": package_build_string(pkg),
+                "build_number": pkg.build_number,
                 "channel": package_channel(pkg),
                 "base_url": package_base_url(pkg),
                 "url": package_url(pkg),
+                "md5": pkg.md5.clone(),
+                "sha256": pkg.sha256.clone(),
+                "depends": pkg.depends.clone(),
                 "platform": pkg.platform,
             })
         })

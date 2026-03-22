@@ -405,11 +405,216 @@ fn list_revisions_reads_history() {
         .stdout
         .clone();
     let body: Value = serde_json::from_slice(&output).expect("valid json");
-    assert!(
-        body["data"]["revisions"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty())
+    let revisions = body["data"]["revisions"]
+        .as_array()
+        .expect("revisions array");
+    assert!(!revisions.is_empty());
+    assert!(revisions[0]["rev"].is_number());
+    assert!(revisions[0]["date"].is_string());
+    assert!(revisions[0]["install"].is_array());
+    assert!(revisions[0]["remove"].is_array());
+}
+
+#[test]
+fn install_pip_only_env_file_keeps_existing_conda_packages() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
     );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let spec_file = tmp.path().join("pip-only.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+dependencies:
+  - pip:
+      - rich==13.0.0
+"#,
+    )
+    .expect("write env file");
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let records = load_installed_records(&prefix);
+    assert!(
+        records
+            .iter()
+            .any(|pkg| pkg["name"] == "python" && pkg["source"] == "conda")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|pkg| pkg["name"] == "rich" && pkg["source"] == "pip")
+    );
+}
+
+#[test]
+fn remove_dependency_also_removes_dependents() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache_with_options(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[
+            PackageSeed::new("python", "3.12.0", "0").depends(&["openssl >=3.0"]),
+            PackageSeed::new("openssl", "3.0.13", "0"),
+        ],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "openssl",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["data"]["removed_names"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|name| name == "python"))
+    );
+
+    let names = installed_package_names(&prefix);
+    assert!(!names.iter().any(|name| name == "openssl"));
+    assert!(!names.iter().any(|name| name == "python"));
+}
+
+#[test]
+fn list_explicit_uses_record_hashes() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache_with_options(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[PackageSeed::new("python", "3.12.0", "0")
+            .md5("0123456789abcdef0123456789abcdef")
+            .sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut list_md5 = Command::cargo_bin("viper").expect("binary exists");
+    let output = list_md5
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--explicit",
+            "--md5",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let lines = body["data"]["packages"]
+        .as_array()
+        .expect("explicit output lines");
+    assert!(
+        lines
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|line| line.ends_with("#0123456789abcdef0123456789abcdef"))
+    );
+
+    let mut list_sha256 = Command::cargo_bin("viper").expect("binary exists");
+    let output = list_sha256
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--explicit",
+            "--sha256",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let lines = body["data"]["packages"]
+        .as_array()
+        .expect("explicit output lines");
+    assert!(lines.iter().filter_map(Value::as_str).any(|line| {
+        line.ends_with("#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    }));
 }
 
 #[test]
@@ -1451,20 +1656,72 @@ fn current_platform_subdir() -> String {
     }
 }
 
+#[derive(Clone)]
+struct PackageSeed {
+    name: String,
+    version: String,
+    build: String,
+    build_number: i64,
+    depends: Vec<String>,
+    md5: Option<String>,
+    sha256: Option<String>,
+}
+
+impl PackageSeed {
+    fn new(name: &str, version: &str, build: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            version: version.to_string(),
+            build: build.to_string(),
+            build_number: 0,
+            depends: Vec::new(),
+            md5: None,
+            sha256: None,
+        }
+    }
+
+    fn depends(mut self, deps: &[&str]) -> Self {
+        self.depends = deps.iter().map(ToString::to_string).collect();
+        self
+    }
+
+    fn md5(mut self, digest: &str) -> Self {
+        self.md5 = Some(digest.to_string());
+        self
+    }
+
+    fn sha256(mut self, digest: &str) -> Self {
+        self.sha256 = Some(digest.to_string());
+        self
+    }
+}
+
 fn seed_repodata_cache(home: &Path, channels: &[&str], packages: &[(&str, &str, &str)]) {
+    let with_defaults = packages
+        .iter()
+        .map(|(name, version, build)| PackageSeed::new(name, version, build))
+        .collect::<Vec<_>>();
+    seed_repodata_cache_with_options(home, channels, &with_defaults);
+}
+
+fn seed_repodata_cache_with_options(home: &Path, channels: &[&str], packages: &[PackageSeed]) {
     let cache_root = home.join(".viper").join("pkgs").join("cache");
     fs::create_dir_all(&cache_root).expect("create cache root");
 
     let packages_json = packages
         .iter()
-        .map(|(name, version, build)| {
-            let filename = format!("{name}-{version}-{build}.tar.bz2");
+        .map(|pkg| {
+            let filename = format!("{}-{}-{}.tar.bz2", pkg.name, pkg.version, pkg.build);
             (
                 filename,
                 serde_json::json!({
-                    "name": name,
-                    "version": version,
-                    "build": build,
+                    "name": &pkg.name,
+                    "version": &pkg.version,
+                    "build": &pkg.build,
+                    "build_number": pkg.build_number,
+                    "depends": &pkg.depends,
+                    "md5": &pkg.md5,
+                    "sha256": &pkg.sha256,
                 }),
             )
         })

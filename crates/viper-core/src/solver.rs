@@ -110,13 +110,24 @@ pub fn solve_to_actions(
             name: best.name.clone(),
             version: best.version.clone(),
             build: best.build.clone(),
+            build_number: best.build_number,
+            dist_name: package_dist_name(best),
             channel: best.channel.clone(),
+            base_url: best.base_url.clone(),
             url: best.url.clone(),
+            md5: best.md5.clone(),
+            sha256: best.sha256.clone(),
+            depends: best.depends.clone(),
+            platform: best.subdir.clone(),
             source: "conda".to_string(),
         })
         .collect::<Vec<_>>();
 
     Ok(SolveResult { actions, trace })
+}
+
+fn package_dist_name(pkg: &RepoPackage) -> String {
+    format!("{}-{}-{}", pkg.name, pkg.version, pkg.build)
 }
 
 fn requested_name(spec: &str, parsed: Option<&MatchSpec>) -> String {

@@ -77,6 +77,14 @@ pub struct PackageRecord {
     pub base_url: String,
     #[serde(default)]
     pub url: String,
+    #[serde(default)]
+    pub md5: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub build_number: i64,
+    #[serde(default)]
+    pub dist_name: String,
     pub spec: String,
     #[serde(default = "default_package_source")]
     pub source: String,

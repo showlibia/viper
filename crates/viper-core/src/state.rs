@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,7 +6,7 @@ use chrono::Utc;
 
 use crate::error::CoreError;
 use crate::spec::package_name_from_spec;
-use crate::transaction::PlannedLink;
+use crate::transaction::{PlannedLink, PlannedUnlink};
 use crate::types::PackageRecord;
 
 const HISTORY_FILE: &str = "history";
@@ -14,6 +14,14 @@ const HISTORY_FILE: &str = "history";
 #[derive(Debug)]
 pub struct EnvironmentState {
     pub packages: Vec<PackageRecord>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RevisionRecord {
+    pub rev: usize,
+    pub date: String,
+    pub install: Vec<String>,
+    pub remove: Vec<String>,
 }
 
 impl EnvironmentState {
@@ -96,11 +104,16 @@ impl EnvironmentState {
                 .cloned()
                 .unwrap_or(fallback_spec);
 
-            let base_url = link
-                .url
-                .rsplit_once('/')
-                .and_then(|(prefix, _)| prefix.rsplit_once('/').map(|(base, _)| base.to_string()))
-                .unwrap_or_else(|| link.channel.clone());
+            let base_url = if link.base_url.is_empty() {
+                link.url
+                    .rsplit_once('/')
+                    .and_then(|(prefix, _)| {
+                        prefix.rsplit_once('/').map(|(base, _)| base.to_string())
+                    })
+                    .unwrap_or_else(|| link.channel.clone())
+            } else {
+                link.base_url.clone()
+            };
 
             if let Some(existing) = self
                 .packages
@@ -115,10 +128,22 @@ impl EnvironmentState {
                 existing.channel = link.channel.clone();
                 existing.base_url = base_url;
                 existing.url = link.url.clone();
+                existing.md5 = link.md5.clone();
+                existing.sha256 = link.sha256.clone();
+                existing.build_number = link.build_number;
+                existing.dist_name = if link.dist_name.is_empty() {
+                    format!("{}-{}-{}", link.name, link.version, link.build)
+                } else {
+                    link.dist_name.clone()
+                };
                 existing.spec = spec;
                 existing.source = "conda".to_string();
-                existing.depends = Vec::new();
-                existing.platform = platform.to_string();
+                existing.depends = link.depends.clone();
+                existing.platform = if link.platform.is_empty() {
+                    platform.to_string()
+                } else {
+                    link.platform.clone()
+                };
                 existing.installed_at = now;
                 if !was_same {
                     changed += 1;
@@ -131,11 +156,23 @@ impl EnvironmentState {
                     channel: link.channel.clone(),
                     base_url,
                     url: link.url.clone(),
+                    md5: link.md5.clone(),
+                    sha256: link.sha256.clone(),
+                    build_number: link.build_number,
+                    dist_name: if link.dist_name.is_empty() {
+                        format!("{}-{}-{}", link.name, link.version, link.build)
+                    } else {
+                        link.dist_name.clone()
+                    },
                     spec,
                     source: "conda".to_string(),
-                    depends: Vec::new(),
+                    depends: link.depends.clone(),
                     installed_at: now,
-                    platform: platform.to_string(),
+                    platform: if link.platform.is_empty() {
+                        platform.to_string()
+                    } else {
+                        link.platform.clone()
+                    },
                 });
                 changed += 1;
             }
@@ -171,6 +208,10 @@ impl EnvironmentState {
                 existing.channel = "pypi".to_string();
                 existing.base_url = "https://pypi.org".to_string();
                 existing.url = format!("https://pypi.org/project/{name}/");
+                existing.md5 = None;
+                existing.sha256 = None;
+                existing.build_number = 0;
+                existing.dist_name = spec.clone();
                 existing.installed_at = now;
                 existing.platform = platform.to_string();
             } else {
@@ -181,6 +222,10 @@ impl EnvironmentState {
                     channel: "pypi".to_string(),
                     base_url: "https://pypi.org".to_string(),
                     url: format!("https://pypi.org/project/{name}/"),
+                    md5: None,
+                    sha256: None,
+                    build_number: 0,
+                    dist_name: spec.clone(),
                     spec: spec.clone(),
                     source: "pip".to_string(),
                     depends: Vec::new(),
@@ -195,16 +240,46 @@ impl EnvironmentState {
         Ok(changed)
     }
 
-    pub fn remove_specs(&mut self, specs: &[String]) -> Result<usize, CoreError> {
-        let mut names = Vec::with_capacity(specs.len());
+    pub fn remove_specs(&mut self, specs: &[String]) -> Result<Vec<PlannedUnlink>, CoreError> {
+        let mut names = HashSet::with_capacity(specs.len());
         for spec in specs {
-            names.push(package_name_from_spec(spec)?);
+            names.insert(package_name_from_spec(spec)?);
         }
 
-        let before = self.packages.len();
-        self.packages
-            .retain(|p| !names.iter().any(|n| n == &p.name));
-        Ok(before.saturating_sub(self.packages.len()))
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for pkg in &self.packages {
+                if names.contains(&pkg.name) {
+                    continue;
+                }
+                let depends_on_removed = pkg
+                    .depends
+                    .iter()
+                    .filter_map(|dep| package_name_from_spec(dep).ok())
+                    .any(|dep_name| names.contains(&dep_name));
+                if depends_on_removed && names.insert(pkg.name.clone()) {
+                    changed = true;
+                }
+            }
+        }
+
+        let mut removed = self
+            .packages
+            .iter()
+            .filter(|pkg| names.contains(&pkg.name))
+            .map(|pkg| PlannedUnlink {
+                name: pkg.name.clone(),
+                version: pkg.version.clone(),
+                build: pkg.build_string.clone(),
+                dist_name: pkg.dist_name.clone(),
+                source: pkg.source.clone(),
+            })
+            .collect::<Vec<_>>();
+        removed.sort_by(|a, b| a.name.cmp(&b.name));
+
+        self.packages.retain(|p| !names.contains(&p.name));
+        Ok(removed)
     }
 
     pub fn conda_locked_specs(&self) -> Vec<String> {
@@ -229,10 +304,12 @@ impl EnvironmentState {
         block.push_str(&format!("==> {} <==\n", Utc::now().to_rfc3339()));
         block.push_str(&format!("operation: {operation}\n"));
         for link in conda_links {
-            block.push_str(&format!(
-                "+ {}-{}-{}\n",
-                link.name, link.version, link.build
-            ));
+            let dist = if link.dist_name.is_empty() {
+                format!("{}-{}-{}", link.name, link.version, link.build)
+            } else {
+                link.dist_name.clone()
+            };
+            block.push_str(&format!("+ {dist}\n"));
         }
         for name in removed {
             block.push_str(&format!("- {name}\n"));
@@ -245,19 +322,61 @@ impl EnvironmentState {
         Ok(())
     }
 
-    pub fn revisions(prefix: &Path) -> Result<Vec<String>, CoreError> {
+    pub fn revisions(prefix: &Path) -> Result<Vec<RevisionRecord>, CoreError> {
         let history = fs::read_to_string(history_path(prefix))?;
-        let revisions = history
-            .lines()
-            .filter(|line| line.starts_with("==> ") && line.ends_with(" <=="))
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
+        let mut revisions = Vec::new();
+        let mut date = String::new();
+        let mut install = Vec::new();
+        let mut remove = Vec::new();
+        let mut has_header = false;
+
+        for line in history.lines() {
+            if line.starts_with("==> ") && line.ends_with(" <==") {
+                if has_header && (!install.is_empty() || !remove.is_empty()) {
+                    revisions.push(RevisionRecord {
+                        rev: revisions.len(),
+                        date: date.clone(),
+                        install: install.clone(),
+                        remove: remove.clone(),
+                    });
+                }
+                date = line
+                    .trim_start_matches("==> ")
+                    .trim_end_matches(" <==")
+                    .to_string();
+                install.clear();
+                remove.clear();
+                has_header = true;
+                continue;
+            }
+
+            if let Some(dist) = line.strip_prefix("+ ") {
+                install.push(dist.to_string());
+                continue;
+            }
+            if let Some(dist) = line.strip_prefix("- ") {
+                remove.push(dist.to_string());
+            }
+        }
+
+        if has_header && (!install.is_empty() || !remove.is_empty()) {
+            revisions.push(RevisionRecord {
+                rev: revisions.len(),
+                date,
+                install,
+                remove,
+            });
+        }
+
         Ok(revisions)
     }
 }
 
 fn package_record_filename(record: &PackageRecord) -> String {
     if record.source == "conda" {
+        if !record.dist_name.is_empty() {
+            return format!("{}.json", record.dist_name);
+        }
         return format!(
             "{}-{}-{}.json",
             record.name, record.version, record.build_string
