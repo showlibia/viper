@@ -77,6 +77,12 @@ struct RemoveArgs {
 
     #[arg(long = "all")]
     all: bool,
+
+    #[arg(long = "force")]
+    force: bool,
+
+    #[arg(long = "no-prune-deps")]
+    no_prune_deps: bool,
 }
 
 #[derive(Args, Debug)]
@@ -161,6 +167,8 @@ fn run() -> Result<()> {
         Commands::Remove(args) => CliOperation::Remove {
             specs: args.specs,
             all: args.all,
+            force: args.force,
+            no_prune_deps: args.no_prune_deps,
         },
         Commands::List(args) => CliOperation::List(viper_core::ListOptions {
             regex: args.regex,

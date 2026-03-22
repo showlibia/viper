@@ -240,7 +240,11 @@ impl EnvironmentState {
         Ok(changed)
     }
 
-    pub fn remove_specs(&mut self, specs: &[String]) -> Result<Vec<PlannedUnlink>, CoreError> {
+    pub fn remove_specs(
+        &mut self,
+        specs: &[String],
+        prune_dependencies: bool,
+    ) -> Result<Vec<PlannedUnlink>, CoreError> {
         let mut names = HashSet::with_capacity(specs.len());
         for spec in specs {
             names.insert(package_name_from_spec(spec)?);
@@ -271,50 +275,52 @@ impl EnvironmentState {
             }
         }
 
-        let mut prune_queue = Vec::new();
-        for pkg in &self.packages {
-            if !names.contains(&pkg.name) {
-                continue;
-            }
-            for dep in pkg
-                .depends
-                .iter()
-                .filter_map(|dep| package_name_from_spec(dep).ok())
-            {
-                prune_queue.push(dep);
-            }
-        }
-        while let Some(candidate) = prune_queue.pop() {
-            if names.contains(&candidate) {
-                continue;
-            }
-
-            let still_required = self
-                .packages
-                .iter()
-                .filter(|pkg| !names.contains(&pkg.name))
-                .any(|pkg| {
-                    pkg.depends
-                        .iter()
-                        .filter_map(|dep| package_name_from_spec(dep).ok())
-                        .any(|dep| dep == candidate)
-                });
-            if still_required {
-                continue;
-            }
-
-            if let Some(pkg) = self
-                .packages
-                .iter()
-                .find(|pkg| pkg.name == candidate && pkg.source == "conda")
-            {
-                names.insert(pkg.name.clone());
+        if prune_dependencies {
+            let mut prune_queue = Vec::new();
+            for pkg in &self.packages {
+                if !names.contains(&pkg.name) {
+                    continue;
+                }
                 for dep in pkg
                     .depends
                     .iter()
                     .filter_map(|dep| package_name_from_spec(dep).ok())
                 {
                     prune_queue.push(dep);
+                }
+            }
+            while let Some(candidate) = prune_queue.pop() {
+                if names.contains(&candidate) {
+                    continue;
+                }
+
+                let still_required = self
+                    .packages
+                    .iter()
+                    .filter(|pkg| !names.contains(&pkg.name))
+                    .any(|pkg| {
+                        pkg.depends
+                            .iter()
+                            .filter_map(|dep| package_name_from_spec(dep).ok())
+                            .any(|dep| dep == candidate)
+                    });
+                if still_required {
+                    continue;
+                }
+
+                if let Some(pkg) = self
+                    .packages
+                    .iter()
+                    .find(|pkg| pkg.name == candidate && pkg.source == "conda")
+                {
+                    names.insert(pkg.name.clone());
+                    for dep in pkg
+                        .depends
+                        .iter()
+                        .filter_map(|dep| package_name_from_spec(dep).ok())
+                    {
+                        prune_queue.push(dep);
+                    }
                 }
             }
         }
@@ -334,6 +340,38 @@ impl EnvironmentState {
         removed.sort_by(|a, b| a.name.cmp(&b.name));
 
         self.packages.retain(|p| !names.contains(&p.name));
+        Ok(removed)
+    }
+
+    pub fn force_remove_specs(
+        &mut self,
+        specs: &[String],
+    ) -> Result<Vec<PlannedUnlink>, CoreError> {
+        let mut names = HashSet::with_capacity(specs.len());
+        for spec in specs {
+            names.insert(package_name_from_spec(spec)?);
+        }
+        for name in &names {
+            let exists = self.packages.iter().any(|pkg| pkg.name == *name);
+            if !exists {
+                return Err(CoreError::PackageNotInstalled(name.clone()));
+            }
+        }
+
+        let mut removed = self
+            .packages
+            .iter()
+            .filter(|pkg| names.contains(&pkg.name))
+            .map(|pkg| PlannedUnlink {
+                name: pkg.name.clone(),
+                version: pkg.version.clone(),
+                build: pkg.build_string.clone(),
+                dist_name: pkg.dist_name.clone(),
+                source: pkg.source.clone(),
+            })
+            .collect::<Vec<_>>();
+        removed.sort_by(|a, b| a.name.cmp(&b.name));
+        self.packages.retain(|pkg| !names.contains(&pkg.name));
         Ok(removed)
     }
 
@@ -367,6 +405,7 @@ impl EnvironmentState {
     pub fn append_history(
         prefix: &Path,
         operation: &str,
+        requested_specs: &[String],
         conda_links: &[PlannedLink],
         removed: &[String],
     ) -> Result<(), CoreError> {
@@ -377,6 +416,10 @@ impl EnvironmentState {
         let mut block = String::new();
         block.push_str(&format!("==> {} <==\n", Utc::now().to_rfc3339()));
         block.push_str(&format!("operation: {operation}\n"));
+        block.push_str(&format!(
+            "# {operation} specs: {}\n",
+            serde_json::to_string(requested_specs)?
+        ));
         for link in conda_links {
             let dist = if link.dist_name.is_empty() {
                 format!("{}-{}-{}", link.name, link.version, link.build)

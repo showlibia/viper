@@ -111,6 +111,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     EnvironmentState::append_history(
                         &target_prefix,
                         "create",
+                        &normalized.conda_specs,
                         &conda_plan.link,
                         &removed,
                     )?;
@@ -230,6 +231,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     EnvironmentState::append_history(
                         &target_prefix,
                         "install",
+                        &normalized.conda_specs,
                         &conda_plan.link,
                         &removed,
                     )?;
@@ -254,7 +256,12 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             result.warnings = normalized.warnings;
             Ok(result)
         }
-        CliOperation::Remove { specs, all } => {
+        CliOperation::Remove {
+            specs,
+            all,
+            force,
+            no_prune_deps,
+        } => {
             let target_prefix = config
                 .target_prefix
                 .clone()
@@ -285,7 +292,11 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             }
 
             let mut state = EnvironmentState::load(&target_prefix)?;
-            let removed = state.remove_specs(&specs)?;
+            let removed = if force {
+                state.force_remove_specs(&specs)?
+            } else {
+                state.remove_specs(&specs, !no_prune_deps)?
+            };
             let removed_names = removed
                 .iter()
                 .map(|item| item.name.clone())
@@ -296,7 +307,13 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     .iter()
                     .map(|item| item.dist_name.clone())
                     .collect::<Vec<_>>();
-                EnvironmentState::append_history(&target_prefix, "remove", &[], &removed_dist)?;
+                EnvironmentState::append_history(
+                    &target_prefix,
+                    "remove",
+                    &specs,
+                    &[],
+                    &removed_dist,
+                )?;
             }
 
             Ok(OperationResult::ok(

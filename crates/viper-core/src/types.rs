@@ -31,6 +31,8 @@ pub enum CliOperation {
     Remove {
         specs: Vec<String>,
         all: bool,
+        force: bool,
+        no_prune_deps: bool,
     },
     List(ListOptions),
     Info,

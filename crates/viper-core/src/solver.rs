@@ -89,7 +89,14 @@ pub fn solve_to_actions(
 
         for dep in chosen.depends.iter().rev() {
             let dep_name = package_name_from_spec(dep).unwrap_or_else(|_| dep.clone());
-            if selected.contains_key(&dep_name) {
+            if let Some(existing) = selected.get(&dep_name) {
+                let dep_spec = dep.parse::<MatchSpec>().ok();
+                if !candidate_matches_spec(dep_spec.as_ref(), existing) {
+                    conflicts.push(format!(
+                        "conflict: {}={} requires '{}' but selected {}={}",
+                        chosen.name, chosen.version, dep, existing.name, existing.version
+                    ));
+                }
                 continue;
             }
             pending.push(PendingSpec {
@@ -535,6 +542,41 @@ mod tests {
 
         assert!(err.iter().any(|line| line.contains("unsatisfied")));
         assert!(err.iter().any(|line| line.contains("openssl")));
+    }
+
+    #[test]
+    fn reports_conflicts_when_selected_dependency_violates_new_constraint() {
+        let mut a_pkg = pkg(
+            "a",
+            "1.0.0",
+            "0",
+            "https://conda.anaconda.org/conda-forge",
+            "linux-64",
+        );
+        a_pkg.depends = vec!["b >=2".to_string()];
+        let b1 = pkg(
+            "b",
+            "1.0.0",
+            "0",
+            "https://conda.anaconda.org/conda-forge",
+            "linux-64",
+        );
+        let b2 = pkg(
+            "b",
+            "2.0.0",
+            "0",
+            "https://conda.anaconda.org/conda-forge",
+            "linux-64",
+        );
+
+        let err = solve_to_actions(
+            &["a".to_string(), "b=1".to_string()],
+            &[a_pkg, b1, b2],
+            &options(&["conda-forge"], false),
+        )
+        .expect_err("solver must report contradictory constraints");
+        assert!(err.iter().any(|line| line.contains("conflict")));
+        assert!(err.iter().any(|line| line.contains("b >=2")));
     }
 
     #[test]
