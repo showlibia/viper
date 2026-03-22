@@ -28,6 +28,8 @@ pub enum CoreError {
     OfflineRepodataUnavailable,
     #[error("unsatisfied package specifications: {0:?}")]
     UnsatisfiedSpecs(Vec<String>),
+    #[error("invalid list options: {0}")]
+    InvalidListOptions(String),
     #[error("config key '{0}' is not supported")]
     UnsupportedConfigKey(String),
     #[error("io error: {0}")]

@@ -143,6 +143,179 @@ fn config_set_get_and_info() {
     let info_json: Value = serde_json::from_slice(&output).expect("valid json");
     assert_eq!(info_json["success"], true);
     assert!(info_json["data"]["platform"].is_string());
+    assert!(info_json["data"]["envs_dirs"].is_array());
+    assert!(info_json["data"]["package_cache"].is_array());
+    assert!(info_json["data"]["user_config_files"].is_array());
+    assert!(info_json["data"]["base_environment"].is_string());
+
+    let mut config_list = Command::cargo_bin("viper").expect("binary exists");
+    let output = config_list
+        .env("HOME", tmp_home.path())
+        .args(["--no-rc", "config", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_json: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(list_json["success"], true);
+    assert!(list_json["data"]["target_prefix"].is_null());
+    assert_eq!(list_json["data"]["json"], true);
+}
+
+#[test]
+fn list_supports_filter_and_mode_flags() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("pip", "24.0", "0")],
+    );
+
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+dependencies:
+  - python
+  - pip
+  - pip:
+      - pandas==2.2.3
+"#,
+    )
+    .expect("write env file");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut full_name = Command::cargo_bin("viper").expect("binary exists");
+    let output = full_name
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--full-name",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let packages = body["data"]["packages"].as_array().expect("packages array");
+    assert_eq!(packages.len(), 1);
+    assert_eq!(packages[0]["name"], "python");
+
+    let mut no_pip = Command::cargo_bin("viper").expect("binary exists");
+    let output = no_pip
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--no-pip",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let packages = body["data"]["packages"].as_array().expect("packages array");
+    assert!(packages.iter().all(|pkg| pkg["source"] != "pip"));
+
+    let mut canonical = Command::cargo_bin("viper").expect("binary exists");
+    let output = canonical
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--canonical",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let canonical_rows = body["data"]["packages"].as_array().expect("canonical rows");
+    assert!(
+        canonical_rows
+            .iter()
+            .all(|row| row.as_str().is_some_and(|s| s.contains("::")))
+    );
+}
+
+#[test]
+fn list_explicit_rejects_md5_and_sha256_together() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--explicit",
+            "--md5",
+            "--sha256",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], false);
+    assert_eq!(
+        body["error"],
+        "invalid list options: only one of --md5 and --sha256 can be specified"
+    );
 }
 
 #[test]

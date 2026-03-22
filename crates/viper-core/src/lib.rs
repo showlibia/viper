@@ -12,6 +12,6 @@ pub use config::{Config, ConfigInput, ConfigStore};
 pub use core::execute;
 pub use error::CoreError;
 pub use types::{
-    CliConfigCommand, CliGlobalOptions, CliOperation, OperationRequest, OperationResult,
-    PackageRecord,
+    CliConfigCommand, CliGlobalOptions, CliOperation, ListOptions, OperationRequest,
+    OperationResult, PackageRecord,
 };

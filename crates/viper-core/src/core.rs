@@ -8,7 +8,9 @@ use crate::repodata::fetch_packages;
 use crate::solver::{solve_to_actions, spec_requires_full_repodata};
 use crate::spec::parse_env_file;
 use crate::state::{EnvironmentState, ensure_prefix_layout, is_managed_prefix};
-use crate::types::{CliConfigCommand, CliOperation, OperationRequest, OperationResult};
+use crate::types::{
+    CliConfigCommand, CliOperation, ListOptions, OperationRequest, OperationResult, PackageRecord,
+};
 
 struct NormalizedRequestInputs {
     conda_specs: Vec<String>,
@@ -226,7 +228,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 }),
             ))
         }
-        CliOperation::List => {
+        CliOperation::List(list_options) => {
             let target_prefix = config
                 .target_prefix
                 .clone()
@@ -243,13 +245,30 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             }
 
             let state = EnvironmentState::load(&target_prefix)?;
-            Ok(OperationResult::ok(
-                "packages listed",
+            let package_views = render_list_output(state.packages, &list_options)?;
+            let payload = if list_options.revisions {
                 json!({
                     "target_prefix": target_prefix,
-                    "packages": state.packages,
-                }),
-            ))
+                    "revisions": [],
+                    "revisions_supported": false,
+                    "reason": "revision history is not implemented yet",
+                })
+            } else {
+                json!({
+                    "target_prefix": target_prefix,
+                    "packages": package_views,
+                    "applied": {
+                        "regex": list_options.regex,
+                        "full_name": list_options.full_name,
+                        "no_pip": list_options.no_pip,
+                        "reverse": list_options.reverse,
+                        "explicit": list_options.explicit,
+                        "canonical": list_options.canonical,
+                        "export": list_options.export,
+                    },
+                })
+            };
+            Ok(OperationResult::ok("packages listed", payload))
         }
         CliOperation::Info => {
             let env_exists = config
@@ -268,6 +287,10 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "local_repodata_ttl": config.local_repodata_ttl,
                     "json": config.json,
                     "env_exists": env_exists,
+                    "envs_dirs": [config.root_prefix.join("envs")],
+                    "package_cache": [config.root_prefix.join("pkgs")],
+                    "user_config_files": [store.path()],
+                    "base_environment": config.root_prefix,
                     "platform": std::env::consts::OS,
                     "arch": std::env::consts::ARCH,
                 }),
@@ -284,6 +307,8 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "offline": config.offline,
                     "local_repodata_ttl": config.local_repodata_ttl,
                     "rc_path": store.path(),
+                    "target_prefix": config.target_prefix,
+                    "json": config.json,
                 }),
             )),
             CliConfigCommand::Get { key } => {
@@ -478,4 +503,151 @@ fn unresolved_action_names(actions: &[crate::transaction::PlannedLink]) -> Vec<S
         }
     }
     names
+}
+
+fn render_list_output(
+    mut packages: Vec<PackageRecord>,
+    options: &ListOptions,
+) -> Result<serde_json::Value, CoreError> {
+    if options.md5 && options.sha256 {
+        return Err(CoreError::InvalidListOptions(
+            "only one of --md5 and --sha256 can be specified".to_string(),
+        ));
+    }
+
+    if options.no_pip {
+        packages.retain(|p| p.source != "pip");
+    }
+
+    if let Some(pattern) = options.regex.as_deref() {
+        packages.retain(|p| package_name_matches(&p.name, pattern, options.full_name));
+    }
+
+    if options.reverse {
+        packages.reverse();
+    }
+
+    if options.explicit {
+        let lines = packages
+            .iter()
+            .map(|pkg| {
+                let mut line = package_url(pkg);
+                if options.md5 {
+                    line.push('#');
+                    line.push_str("00000000000000000000000000000000");
+                } else if options.sha256 {
+                    line.push('#');
+                    line.push_str(
+                        "0000000000000000000000000000000000000000000000000000000000000000",
+                    );
+                }
+                line
+            })
+            .collect::<Vec<_>>();
+        return Ok(json!(lines));
+    }
+
+    if options.canonical {
+        let rows = packages
+            .iter()
+            .map(|pkg| {
+                format!(
+                    "{}::{}-{}-{}",
+                    package_channel(pkg),
+                    pkg.name,
+                    package_version(pkg),
+                    package_build_string(pkg)
+                )
+            })
+            .collect::<Vec<_>>();
+        return Ok(json!(rows));
+    }
+
+    if options.export {
+        let rows = packages
+            .iter()
+            .map(|pkg| {
+                format!(
+                    "{}={}={}",
+                    pkg.name,
+                    package_version(pkg),
+                    package_build_string(pkg)
+                )
+            })
+            .collect::<Vec<_>>();
+        return Ok(json!(rows));
+    }
+
+    let rows = packages
+        .iter()
+        .map(|pkg| {
+            json!({
+                "name": pkg.name,
+                "spec": pkg.spec,
+                "source": pkg.source,
+                "installed_at": pkg.installed_at,
+                "version": package_version(pkg),
+                "build_string": package_build_string(pkg),
+                "channel": package_channel(pkg),
+                "base_url": package_base_url(pkg),
+                "url": package_url(pkg),
+                "platform": current_platform_subdir(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!(rows))
+}
+
+fn package_name_matches(name: &str, pattern: &str, full_name: bool) -> bool {
+    if full_name {
+        return name == pattern;
+    }
+    name.contains(pattern)
+}
+
+fn package_version(pkg: &PackageRecord) -> String {
+    pkg.spec
+        .split_once('=')
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn package_build_string(pkg: &PackageRecord) -> String {
+    if pkg.source == "pip" {
+        "pypi_0".to_string()
+    } else {
+        "0".to_string()
+    }
+}
+
+fn package_channel(pkg: &PackageRecord) -> String {
+    if pkg.source == "pip" {
+        "pypi".to_string()
+    } else {
+        "conda-forge".to_string()
+    }
+}
+
+fn package_base_url(pkg: &PackageRecord) -> String {
+    if pkg.source == "pip" {
+        "https://pypi.org/".to_string()
+    } else {
+        "https://conda.anaconda.org/conda-forge".to_string()
+    }
+}
+
+fn package_url(pkg: &PackageRecord) -> String {
+    if pkg.source == "pip" {
+        format!("https://pypi.org/project/{}/", pkg.name)
+    } else {
+        format!(
+            "{}/{}/{}-{}-{}.tar.bz2",
+            package_base_url(pkg),
+            current_platform_subdir(),
+            pkg.name,
+            package_version(pkg),
+            package_build_string(pkg)
+        )
+    }
 }

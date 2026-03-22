@@ -25,12 +25,15 @@ This document tracks command-level behavior alignment using upstream `mamba/` so
 | `remove` | Non-managed prefix fails | `mamba/micromamba/src/remove.cpp` env-prefix guard; `mamba/micromamba/tests/test_remove.py` target-prefix checks | `crates/viper-cli/tests/cli_smoke.rs` `install_remove_list_fail_for_unmanaged_prefix` |
 | `list` | Missing target prefix fails | `mamba/micromamba/src/list.cpp` prefix option handling; `mamba/micromamba/tests/test_list.py` prefix handling expectations | `crates/viper-cli/tests/cli_smoke.rs` `install_remove_list_fail_when_prefix_missing` |
 | `list` | Non-managed prefix fails | `mamba/micromamba/src/list.cpp` prefix/env checks; `mamba/micromamba/tests/test_list.py` env-prefix validity checks | `crates/viper-cli/tests/cli_smoke.rs` `install_remove_list_fail_for_unmanaged_prefix` |
-| `info` | Returns JSON metadata envelope | `mamba/micromamba/src/info.cpp` JSON printer and context fields | `crates/viper-cli/tests/cli_smoke.rs` `config_set_get_and_info` |
-| `config` | `set/get` roundtrip persists and reads values | `mamba/micromamba/src/config.cpp` set/get command paths | `crates/viper-cli/tests/cli_smoke.rs` `config_set_get_and_info` |
+| `list` | Supports regex + `--full-name` filtering on package names | `mamba/micromamba/src/list.cpp` `list_regex` and `full_name`; `mamba/micromamba/tests/test_list.py` `test_list_name` | `crates/viper-cli/tests/cli_smoke.rs` `list_supports_filter_and_mode_flags` |
+| `list` | Supports `--no-pip` filtering and canonical output mode | `mamba/micromamba/src/list.cpp` `no_pip` and `canonical`; `mamba/micromamba/tests/test_list.py` `test_list_with_pip` and `test_list_subcommands` | `crates/viper-cli/tests/cli_smoke.rs` `list_supports_filter_and_mode_flags` |
+| `list` | Rejects `--md5` + `--sha256` together when rendering explicit outputs | `mamba/micromamba/tests/test_list.py` `test_list_subcommands` invalid-hash-flags assertion | `crates/viper-cli/tests/cli_smoke.rs` `list_explicit_rejects_md5_and_sha256_together` |
+| `info` | Returns JSON metadata envelope with environment/config path fields | `mamba/micromamba/src/info.cpp`; `mamba/micromamba/tests/test_info.py` `flags_test` required keys | `crates/viper-cli/tests/cli_smoke.rs` `config_set_get_and_info` |
+| `config` | `set/get` roundtrip persists and `config list` returns structured keys | `mamba/micromamba/src/config.cpp` set/get/list command paths; `mamba/micromamba/tests/test_config.py` `TestConfigList` | `crates/viper-cli/tests/cli_smoke.rs` `config_set_get_and_info` |
 
 ## Pending List Surface
 
-The following upstream `list` options are defined in `mamba/micromamba/src/list.cpp` but are not yet implemented in `viper-cli`:
+`viper-cli` now accepts the full option surface from `mamba/micromamba/src/list.cpp`:
 
 - `regex`
 - `--full-name`
@@ -42,6 +45,8 @@ The following upstream `list` options are defined in `mamba/micromamba/src/list.
 - `--canonical`
 - `--export`
 - `--revisions`
+
+Behavior parity remains in progress for full revision-history rendering.
 
 ## Repodata and Parser Matrix
 

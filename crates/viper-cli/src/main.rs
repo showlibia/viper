@@ -56,7 +56,7 @@ enum Commands {
     Create(PackageArgs),
     Install(PackageArgs),
     Remove(RemoveArgs),
-    List,
+    List(ListArgs),
     Info,
     Config(ConfigArgs),
 }
@@ -77,6 +77,39 @@ struct RemoveArgs {
 
     #[arg(long = "all")]
     all: bool,
+}
+
+#[derive(Args, Debug)]
+struct ListArgs {
+    #[arg(value_name = "REGEX")]
+    regex: Option<String>,
+
+    #[arg(short = 'f', long = "full-name")]
+    full_name: bool,
+
+    #[arg(long = "no-pip")]
+    no_pip: bool,
+
+    #[arg(long = "reverse")]
+    reverse: bool,
+
+    #[arg(long = "explicit")]
+    explicit: bool,
+
+    #[arg(long = "md5")]
+    md5: bool,
+
+    #[arg(long = "sha256")]
+    sha256: bool,
+
+    #[arg(long = "canonical")]
+    canonical: bool,
+
+    #[arg(long = "export")]
+    export: bool,
+
+    #[arg(long = "revisions")]
+    revisions: bool,
 }
 
 #[derive(Args, Debug)]
@@ -129,7 +162,18 @@ fn run() -> Result<()> {
             specs: args.specs,
             all: args.all,
         },
-        Commands::List => CliOperation::List,
+        Commands::List(args) => CliOperation::List(viper_core::ListOptions {
+            regex: args.regex,
+            full_name: args.full_name,
+            no_pip: args.no_pip,
+            reverse: args.reverse,
+            explicit: args.explicit,
+            md5: args.md5,
+            sha256: args.sha256,
+            canonical: args.canonical,
+            export: args.export,
+            revisions: args.revisions,
+        }),
         Commands::Info => CliOperation::Info,
         Commands::Config(args) => CliOperation::Config(match args.command {
             ConfigCommands::List => CliConfigCommand::List,

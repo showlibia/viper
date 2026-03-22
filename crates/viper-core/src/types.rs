@@ -32,9 +32,23 @@ pub enum CliOperation {
         specs: Vec<String>,
         all: bool,
     },
-    List,
+    List(ListOptions),
     Info,
     Config(CliConfigCommand),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListOptions {
+    pub regex: Option<String>,
+    pub full_name: bool,
+    pub no_pip: bool,
+    pub reverse: bool,
+    pub explicit: bool,
+    pub md5: bool,
+    pub sha256: bool,
+    pub canonical: bool,
+    pub export: bool,
+    pub revisions: bool,
 }
 
 #[derive(Debug, Clone)]
