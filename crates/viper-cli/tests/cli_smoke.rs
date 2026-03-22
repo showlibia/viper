@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
+use insta::assert_json_snapshot;
 use predicates::str::contains;
 use serde_json::Value;
 use tempfile::tempdir;
@@ -287,6 +288,49 @@ fn config_set_get_and_info() {
 }
 
 #[test]
+fn info_json_snapshot_is_stable() {
+    let tmp_home = tempdir().expect("create temp home");
+    let mut info = Command::cargo_bin("viper").expect("binary exists");
+    let output = info
+        .env("HOME", tmp_home.path())
+        .args(["--no-rc", "info", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mut body: Value = serde_json::from_slice(&output).expect("valid json");
+    body["data"]["root_prefix"] = serde_json::json!("<root_prefix>");
+    body["data"]["package_cache"] = serde_json::json!(["<package_cache>"]);
+    body["data"]["envs_dirs"] = serde_json::json!(["<envs_dir>"]);
+    body["data"]["user_config_files"] = serde_json::json!(["<config_file>"]);
+    body["data"]["base_environment"] = serde_json::json!("<base_environment>");
+    body["data"]["target_prefix"] = serde_json::json!(null);
+    assert_json_snapshot!("info_json_snapshot", body);
+}
+
+#[test]
+fn config_list_json_snapshot_is_stable() {
+    let tmp_home = tempdir().expect("create temp home");
+    let mut config_list = Command::cargo_bin("viper").expect("binary exists");
+    let output = config_list
+        .env("HOME", tmp_home.path())
+        .args(["--no-rc", "config", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mut body: Value = serde_json::from_slice(&output).expect("valid json");
+    body["data"]["root_prefix"] = serde_json::json!("<root_prefix>");
+    body["data"]["package_cache"] = serde_json::json!(["<package_cache>"]);
+    body["data"]["envs_dirs"] = serde_json::json!(["<envs_dir>"]);
+    body["data"]["target_prefix"] = serde_json::json!(null);
+    body["data"]["rc_path"] = serde_json::json!("<rc_path>");
+    assert_json_snapshot!("config_list_json_snapshot", body);
+}
+
+#[test]
 fn list_supports_filter_and_mode_flags() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
@@ -388,6 +432,59 @@ dependencies:
             .iter()
             .all(|row| row.as_str().is_some_and(|s| s.contains("::")))
     );
+}
+
+#[test]
+fn list_json_snapshot_is_stable() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("pip", "24.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "pip",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mut body: Value = serde_json::from_slice(&output).expect("valid json");
+    body["data"]["target_prefix"] = serde_json::json!("<target_prefix>");
+    if let Some(packages) = body["data"]["packages"].as_array_mut() {
+        for package in packages {
+            if package.get("installed_at").is_some() {
+                package["installed_at"] = serde_json::json!("<installed_at>");
+            }
+        }
+    }
+    assert_json_snapshot!("list_json_snapshot", body);
 }
 
 #[test]

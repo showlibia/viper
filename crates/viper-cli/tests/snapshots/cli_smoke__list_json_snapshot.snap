@@ -1,0 +1,57 @@
+---
+source: crates/viper-cli/tests/cli_smoke.rs
+expression: body
+---
+{
+  "data": {
+    "applied": {
+      "canonical": false,
+      "explicit": false,
+      "export": false,
+      "full_name": false,
+      "no_pip": false,
+      "regex": null,
+      "reverse": false
+    },
+    "packages": [
+      {
+        "base_url": "https://conda.anaconda.org/conda-forge",
+        "build_number": 0,
+        "build_string": "0",
+        "channel": "https://conda.anaconda.org/conda-forge",
+        "depends": [],
+        "dist_name": "pip-24.0-0",
+        "installed_at": "<installed_at>",
+        "md5": null,
+        "name": "pip",
+        "platform": "linux-64",
+        "sha256": null,
+        "source": "conda",
+        "spec": "pip",
+        "url": "https://conda.anaconda.org/conda-forge/linux-64/pip-24.0-0.tar.bz2",
+        "version": "24.0"
+      },
+      {
+        "base_url": "https://conda.anaconda.org/conda-forge",
+        "build_number": 0,
+        "build_string": "0",
+        "channel": "https://conda.anaconda.org/conda-forge",
+        "depends": [],
+        "dist_name": "python-3.12.0-0",
+        "installed_at": "<installed_at>",
+        "md5": null,
+        "name": "python",
+        "platform": "linux-64",
+        "sha256": null,
+        "source": "conda",
+        "spec": "python",
+        "url": "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2",
+        "version": "3.12.0"
+      }
+    ],
+    "target_prefix": "<target_prefix>"
+  },
+  "message": "packages listed",
+  "success": true,
+  "warnings": []
+}

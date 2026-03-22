@@ -46,8 +46,11 @@ This document tracks command-level behavior alignment using upstream `mamba/` so
 | `list` | Rejects `--md5` + `--sha256` together when rendering explicit outputs | `mamba/micromamba/tests/test_list.py` `test_list_subcommands` invalid-hash-flags assertion | `crates/viper-cli/tests/cli_smoke.rs` `list_explicit_rejects_md5_and_sha256_together` |
 | `list` | `--explicit --md5/--sha256` renders persisted hash digests | `mamba/libmamba/src/api/list.cpp` explicit/hash formatting path | `crates/viper-cli/tests/cli_smoke.rs` `list_explicit_uses_record_hashes` |
 | `list` | `--revisions --json` emits structured revision entries with dist-name install/remove payload | `mamba/libmamba/src/api/list.cpp` revisions JSON output; `mamba/libmamba/src/core/history.cpp` dist diff parsing | `crates/viper-cli/tests/cli_smoke.rs` `list_revisions_reads_history`, `remove_history_uses_dist_names_in_revisions` |
+| `list` | High-frequency `--json` output remains snapshot-stable | `mamba/micromamba/tests/test_list.py` JSON output expectations | `crates/viper-cli/tests/cli_smoke.rs` `list_json_snapshot_is_stable` + `tests/snapshots/cli_smoke__list_json_snapshot.snap` |
 | `info` | Returns JSON metadata envelope with environment/config path fields | `mamba/micromamba/src/info.cpp`; `mamba/micromamba/tests/test_info.py` `flags_test` required keys | `crates/viper-cli/tests/cli_smoke.rs` `config_set_get_and_info` |
+| `info` | `--json` output envelope remains snapshot-stable | `mamba/micromamba/tests/test_info.py` `flags_test` JSON structure assertions | `crates/viper-cli/tests/cli_smoke.rs` `info_json_snapshot_is_stable` + `tests/snapshots/cli_smoke__info_json_snapshot.snap` |
 | `config` | `set/get` roundtrip persists and `config list` returns structured keys | `mamba/micromamba/src/config.cpp` set/get/list command paths; `mamba/micromamba/tests/test_config.py` `TestConfigList` | `crates/viper-cli/tests/cli_smoke.rs` `config_set_get_and_info` |
+| `config` | `config list --json` output remains snapshot-stable | `mamba/micromamba/tests/test_config.py` list JSON behavior | `crates/viper-cli/tests/cli_smoke.rs` `config_list_json_snapshot_is_stable` + `tests/snapshots/cli_smoke__config_list_json_snapshot.snap` |
 
 ## Pending List Surface
 
