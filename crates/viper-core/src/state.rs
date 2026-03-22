@@ -246,6 +246,13 @@ impl EnvironmentState {
             names.insert(package_name_from_spec(spec)?);
         }
 
+        for name in &names {
+            let exists = self.packages.iter().any(|pkg| pkg.name == *name);
+            if !exists {
+                return Err(CoreError::PackageNotInstalled(name.clone()));
+            }
+        }
+
         let mut changed = true;
         while changed {
             changed = false;
@@ -260,6 +267,54 @@ impl EnvironmentState {
                     .any(|dep_name| names.contains(&dep_name));
                 if depends_on_removed && names.insert(pkg.name.clone()) {
                     changed = true;
+                }
+            }
+        }
+
+        let mut prune_queue = Vec::new();
+        for pkg in &self.packages {
+            if !names.contains(&pkg.name) {
+                continue;
+            }
+            for dep in pkg
+                .depends
+                .iter()
+                .filter_map(|dep| package_name_from_spec(dep).ok())
+            {
+                prune_queue.push(dep);
+            }
+        }
+        while let Some(candidate) = prune_queue.pop() {
+            if names.contains(&candidate) {
+                continue;
+            }
+
+            let still_required = self
+                .packages
+                .iter()
+                .filter(|pkg| !names.contains(&pkg.name))
+                .any(|pkg| {
+                    pkg.depends
+                        .iter()
+                        .filter_map(|dep| package_name_from_spec(dep).ok())
+                        .any(|dep| dep == candidate)
+                });
+            if still_required {
+                continue;
+            }
+
+            if let Some(pkg) = self
+                .packages
+                .iter()
+                .find(|pkg| pkg.name == candidate && pkg.source == "conda")
+            {
+                names.insert(pkg.name.clone());
+                for dep in pkg
+                    .depends
+                    .iter()
+                    .filter_map(|dep| package_name_from_spec(dep).ok())
+                {
+                    prune_queue.push(dep);
                 }
             }
         }
@@ -280,6 +335,25 @@ impl EnvironmentState {
 
         self.packages.retain(|p| !names.contains(&p.name));
         Ok(removed)
+    }
+
+    pub fn remove_conda_unlinks(&mut self, unlinks: &[PlannedUnlink]) -> usize {
+        let names = unlinks
+            .iter()
+            .map(|item| item.name.clone())
+            .collect::<Vec<_>>();
+        let before = self.packages.len();
+        self.packages
+            .retain(|pkg| !names.iter().any(|name| name == &pkg.name));
+        before.saturating_sub(self.packages.len())
+    }
+
+    pub fn conda_packages(&self) -> Vec<PackageRecord> {
+        self.packages
+            .iter()
+            .filter(|pkg| pkg.source == "conda")
+            .cloned()
+            .collect()
     }
 
     pub fn conda_locked_specs(&self) -> Vec<String> {

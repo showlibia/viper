@@ -30,6 +30,8 @@ pub enum CoreError {
     UnsatisfiedSpecs(Vec<String>),
     #[error("invalid list options: {0}")]
     InvalidListOptions(String),
+    #[error("package '{0}' is not installed")]
+    PackageNotInstalled(String),
     #[error("config key '{0}' is not supported")]
     UnsupportedConfigKey(String),
     #[error("io error: {0}")]

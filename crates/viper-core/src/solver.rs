@@ -14,6 +14,8 @@ use crate::transaction::PlannedLink;
 pub struct SolveOptions {
     pub channels: Vec<String>,
     pub strict_channel_priority: bool,
+    pub installed_preferred: HashMap<String, (String, String)>,
+    pub user_requested: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +70,8 @@ pub fn solve_to_actions(
             packages,
             options.strict_channel_priority,
             &channel_priority,
+            options.installed_preferred.get(&name),
+            options.user_requested.contains(&name),
         ) else {
             let requester = next.required_by.as_deref().unwrap_or("user-requested spec");
             conflicts.push(format!(
@@ -176,6 +180,8 @@ fn pick_best_candidate<'a>(
     packages: &'a [RepoPackage],
     strict_channel_priority: bool,
     channel_priority: &HashMap<String, usize>,
+    installed_preferred: Option<&(String, String)>,
+    user_requested: bool,
 ) -> Option<&'a RepoPackage> {
     let filtered = packages
         .iter()
@@ -202,6 +208,15 @@ fn pick_best_candidate<'a>(
     } else {
         filtered
     };
+
+    if !user_requested
+        && let Some((installed_version, installed_build)) = installed_preferred
+        && let Some(existing) = candidates.iter().find(|candidate| {
+            &candidate.version == installed_version && &candidate.build == installed_build
+        })
+    {
+        return Some(*existing);
+    }
 
     candidates.into_iter().max_by(|a, b| {
         compare_candidates(a, b).then_with(|| compare_channel_rank(a, b, channel_priority))
@@ -326,6 +341,8 @@ mod tests {
         SolveOptions {
             channels: channels.iter().map(ToString::to_string).collect(),
             strict_channel_priority,
+            installed_preferred: HashMap::new(),
+            user_requested: HashSet::new(),
         }
     }
 

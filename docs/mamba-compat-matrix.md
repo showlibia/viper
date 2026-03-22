@@ -21,13 +21,18 @@ This document tracks command-level behavior alignment using upstream `mamba/` so
 | `install` | Non-managed prefix fails | `mamba/micromamba/tests/test_install.py` target-prefix checks (`MAMBA_NOT_ALLOW_NOT_ENV_PREFIX`) | `crates/viper-cli/tests/cli_smoke.rs` `install_remove_list_fail_for_unmanaged_prefix` |
 | `install` | Env-file with prefix-like `name` is rejected | `mamba/micromamba/tests/test_install.py` `yaml_name == "prefix"` failure path | `crates/viper-cli/tests/cli_smoke.rs` `install_from_env_file_rejects_name_with_path_separator` |
 | `install` | `--name` overrides YAML `name` and emits warning | `mamba/libmamba/src/api/install.cpp` env-name conflict warning path | `crates/viper-cli/tests/cli_smoke.rs` `install_prefers_cli_name_over_yaml_name_and_warns` |
+| `install` | Pip-only env-file update preserves existing conda version/build state (no silent conda upgrade) | `mamba/libmamba/src/api/install.cpp` installed-prefix load + solve request path | `crates/viper-cli/tests/cli_smoke.rs` `install_pip_only_env_file_keeps_existing_conda_packages` |
 | `remove` | Missing target prefix fails | `mamba/micromamba/src/remove.cpp` prefix-validation flow; `mamba/micromamba/tests/test_remove.py` target-prefix checks | `crates/viper-cli/tests/cli_smoke.rs` `install_remove_list_fail_when_prefix_missing` |
 | `remove` | Non-managed prefix fails | `mamba/micromamba/src/remove.cpp` env-prefix guard; `mamba/micromamba/tests/test_remove.py` target-prefix checks | `crates/viper-cli/tests/cli_smoke.rs` `install_remove_list_fail_for_unmanaged_prefix` |
+| `remove` | Removing missing package returns explicit error | `mamba/micromamba/tests/test_remove.py` remove error paths | `crates/viper-cli/tests/cli_smoke.rs` `remove_non_installed_package_fails` |
+| `remove` | Default remove prunes dependent/orphaned packages to keep prefix consistent | `mamba/libmamba/src/api/remove.cpp` solver-backed remove request (`clean_dependencies=true`) | `crates/viper-cli/tests/cli_smoke.rs` `remove_dependency_also_removes_dependents` |
 | `list` | Missing target prefix fails | `mamba/micromamba/src/list.cpp` prefix option handling; `mamba/micromamba/tests/test_list.py` prefix handling expectations | `crates/viper-cli/tests/cli_smoke.rs` `install_remove_list_fail_when_prefix_missing` |
 | `list` | Non-managed prefix fails | `mamba/micromamba/src/list.cpp` prefix/env checks; `mamba/micromamba/tests/test_list.py` env-prefix validity checks | `crates/viper-cli/tests/cli_smoke.rs` `install_remove_list_fail_for_unmanaged_prefix` |
 | `list` | Supports regex + `--full-name` filtering on package names | `mamba/micromamba/src/list.cpp` `list_regex` and `full_name`; `mamba/micromamba/tests/test_list.py` `test_list_name` | `crates/viper-cli/tests/cli_smoke.rs` `list_supports_filter_and_mode_flags` |
 | `list` | Supports `--no-pip` filtering and canonical output mode | `mamba/micromamba/src/list.cpp` `no_pip` and `canonical`; `mamba/micromamba/tests/test_list.py` `test_list_with_pip` and `test_list_subcommands` | `crates/viper-cli/tests/cli_smoke.rs` `list_supports_filter_and_mode_flags` |
 | `list` | Rejects `--md5` + `--sha256` together when rendering explicit outputs | `mamba/micromamba/tests/test_list.py` `test_list_subcommands` invalid-hash-flags assertion | `crates/viper-cli/tests/cli_smoke.rs` `list_explicit_rejects_md5_and_sha256_together` |
+| `list` | `--explicit --md5/--sha256` renders persisted hash digests | `mamba/libmamba/src/api/list.cpp` explicit/hash formatting path | `crates/viper-cli/tests/cli_smoke.rs` `list_explicit_uses_record_hashes` |
+| `list` | `--revisions --json` emits structured revision entries with dist-name install/remove payload | `mamba/libmamba/src/api/list.cpp` revisions JSON output; `mamba/libmamba/src/core/history.cpp` dist diff parsing | `crates/viper-cli/tests/cli_smoke.rs` `list_revisions_reads_history`, `remove_history_uses_dist_names_in_revisions` |
 | `info` | Returns JSON metadata envelope with environment/config path fields | `mamba/micromamba/src/info.cpp`; `mamba/micromamba/tests/test_info.py` `flags_test` required keys | `crates/viper-cli/tests/cli_smoke.rs` `config_set_get_and_info` |
 | `config` | `set/get` roundtrip persists and `config list` returns structured keys | `mamba/micromamba/src/config.cpp` set/get/list command paths; `mamba/micromamba/tests/test_config.py` `TestConfigList` | `crates/viper-cli/tests/cli_smoke.rs` `config_set_get_and_info` |
 
@@ -46,7 +51,7 @@ This document tracks command-level behavior alignment using upstream `mamba/` so
 - `--export`
 - `--revisions`
 
-Behavior parity remains in progress for full revision-history rendering.
+Behavior parity remains in progress for full transaction/rollback semantics.
 
 ## Repodata and Parser Matrix
 

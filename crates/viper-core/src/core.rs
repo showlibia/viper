@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use regex::Regex;
@@ -5,10 +6,11 @@ use serde_json::json;
 
 use crate::config::{ConfigInput, ConfigStore, build_config};
 use crate::error::CoreError;
-use crate::repodata::fetch_packages;
+use crate::repodata::{RepoPackage, fetch_packages};
 use crate::solver::{SolveOptions, solve_to_actions, spec_requires_full_repodata};
 use crate::spec::parse_env_file;
 use crate::state::{EnvironmentState, ensure_prefix_layout, is_managed_prefix};
+use crate::transaction::TransactionPlan;
 use crate::types::{
     CliConfigCommand, CliOperation, ListOptions, OperationRequest, OperationResult, PackageRecord,
 };
@@ -64,12 +66,15 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let solve_options = SolveOptions {
                 channels: normalized.channels.clone(),
                 strict_channel_priority: config.channel_priority == "strict",
+                installed_preferred: HashMap::new(),
+                user_requested: requested_names(&normalized.conda_specs),
             };
             let solved = solve_to_actions(&normalized.conda_specs, &repodata, &solve_options)
                 .map_err(CoreError::UnsatisfiedSpecs)?;
             let conda_link_actions = solved.actions;
+            let conda_plan = TransactionPlan::from_solved(&[], &conda_link_actions);
             let platform = current_platform_subdir();
-            let mut link_actions = conda_link_actions.clone();
+            let mut link_actions = conda_plan.link.clone();
             link_actions.extend(normalized.pip_specs.iter().map(|spec| {
                 crate::transaction::PlannedLink {
                     name: crate::spec::package_name_from_spec(spec)
@@ -90,22 +95,26 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             }));
 
             let mut state = EnvironmentState::empty();
-            let changed = state.install_conda_links(
-                &conda_link_actions,
-                &normalized.conda_specs,
-                &platform,
-            )?;
+            let changed =
+                state.install_conda_links(&conda_plan.link, &normalized.conda_specs, &platform)?;
             let pip_changed = state.install_pip_specs(&normalized.pip_specs, &platform)?;
 
             if !config.dry_run {
                 ensure_prefix_layout(&target_prefix)?;
                 state.persist(&target_prefix)?;
-                EnvironmentState::append_history(
-                    &target_prefix,
-                    "create",
-                    &conda_link_actions,
-                    &[],
-                )?;
+                if !conda_plan.link.is_empty() || !conda_plan.unlink.is_empty() {
+                    let removed = conda_plan
+                        .unlink
+                        .iter()
+                        .map(|item| item.dist_name.clone())
+                        .collect::<Vec<_>>();
+                    EnvironmentState::append_history(
+                        &target_prefix,
+                        "create",
+                        &conda_plan.link,
+                        &removed,
+                    )?;
+                }
             }
 
             let mut result = OperationResult::ok(
@@ -159,24 +168,33 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let repodata = if solve_specs.is_empty() {
                 Vec::new()
             } else {
-                fetch_packages(
+                let mut repodata = fetch_packages(
                     &normalized.channels,
                     &current_platform_subdir(),
                     config.offline,
                     &config.root_prefix.join("pkgs").join("cache"),
                     config.local_repodata_ttl,
                     repodata_filename,
-                )?
+                )?;
+                inject_installed_candidates(&mut repodata, &state.conda_packages());
+                repodata
             };
             let solve_options = SolveOptions {
                 channels: normalized.channels.clone(),
                 strict_channel_priority: config.channel_priority == "strict",
+                installed_preferred: state
+                    .conda_packages()
+                    .into_iter()
+                    .map(|pkg| (pkg.name, (pkg.version, pkg.build_string)))
+                    .collect(),
+                user_requested: requested_names(&normalized.conda_specs),
             };
             let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
                 .map_err(CoreError::UnsatisfiedSpecs)?;
             let conda_link_actions = solved.actions;
+            let conda_plan = TransactionPlan::from_solved(&state.packages, &conda_link_actions);
             let platform = current_platform_subdir();
-            let mut link_actions = conda_link_actions.clone();
+            let mut link_actions = conda_plan.link.clone();
             link_actions.extend(normalized.pip_specs.iter().map(|spec| {
                 crate::transaction::PlannedLink {
                     name: crate::spec::package_name_from_spec(spec)
@@ -196,32 +214,38 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 }
             }));
 
-            let changed = state.install_conda_links(
-                &conda_link_actions,
-                &normalized.conda_specs,
-                &platform,
-            )?;
+            let removed_count = state.remove_conda_unlinks(&conda_plan.unlink);
+            let linked_count =
+                state.install_conda_links(&conda_plan.link, &normalized.conda_specs, &platform)?;
             let pip_changed = state.install_pip_specs(&normalized.pip_specs, &platform)?;
 
             if !config.dry_run {
                 state.persist(&target_prefix)?;
-                EnvironmentState::append_history(
-                    &target_prefix,
-                    "install",
-                    &conda_link_actions,
-                    &[],
-                )?;
+                if !conda_plan.link.is_empty() || !conda_plan.unlink.is_empty() {
+                    let removed = conda_plan
+                        .unlink
+                        .iter()
+                        .map(|item| item.dist_name.clone())
+                        .collect::<Vec<_>>();
+                    EnvironmentState::append_history(
+                        &target_prefix,
+                        "install",
+                        &conda_plan.link,
+                        &removed,
+                    )?;
+                }
             }
 
             let mut result = OperationResult::ok(
                 "packages installed",
                 json!({
                     "target_prefix": target_prefix,
-                    "changed": changed + pip_changed,
+                    "changed": linked_count + removed_count + pip_changed,
                     "specs": normalized.conda_specs,
                     "pip_specs": normalized.pip_specs,
                     "actions": {
                         "link": link_actions,
+                        "unlink": conda_plan.unlink,
                     },
                     "solver_trace": if config.verbose >= 3 { Some(solved.trace) } else { None },
                     "dry_run": config.dry_run,
@@ -268,7 +292,11 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 .collect::<Vec<_>>();
             if !config.dry_run {
                 state.persist(&target_prefix)?;
-                EnvironmentState::append_history(&target_prefix, "remove", &[], &removed_names)?;
+                let removed_dist = removed
+                    .iter()
+                    .map(|item| item.dist_name.clone())
+                    .collect::<Vec<_>>();
+                EnvironmentState::append_history(&target_prefix, "remove", &[], &removed_dist)?;
             }
 
             Ok(OperationResult::ok(
@@ -680,4 +708,65 @@ fn dedup_specs(specs: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+fn requested_names(specs: &[String]) -> HashSet<String> {
+    specs
+        .iter()
+        .filter_map(|spec| crate::spec::package_name_from_spec(spec).ok())
+        .collect()
+}
+
+fn inject_installed_candidates(repodata: &mut Vec<RepoPackage>, installed: &[PackageRecord]) {
+    for pkg in installed {
+        if repodata.iter().any(|candidate| {
+            candidate.name == pkg.name
+                && candidate.version == pkg.version
+                && candidate.build == pkg.build_string
+        }) {
+            continue;
+        }
+        repodata.push(package_record_to_repo_package(pkg));
+    }
+}
+
+fn package_record_to_repo_package(record: &PackageRecord) -> RepoPackage {
+    let filename = record
+        .url
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            let dist = if record.dist_name.is_empty() {
+                format!("{}-{}-{}", record.name, record.version, record.build_string)
+            } else {
+                record.dist_name.clone()
+            };
+            format!("{dist}.tar.bz2")
+        });
+    RepoPackage {
+        name: record.name.clone(),
+        version: record.version.clone(),
+        build: record.build_string.clone(),
+        build_number: record.build_number,
+        subdir: record.platform.clone(),
+        filename: filename.clone(),
+        depends: record.depends.clone(),
+        constrains: Vec::new(),
+        md5: record.md5.clone(),
+        sha256: record.sha256.clone(),
+        channel: record.channel.clone(),
+        base_url: record.base_url.clone(),
+        url: if record.url.is_empty() {
+            format!(
+                "{}/{}/{}",
+                record.base_url.trim_end_matches('/'),
+                record.platform,
+                filename
+            )
+        } else {
+            record.url.clone()
+        },
+    }
 }

@@ -420,10 +420,10 @@ fn install_pip_only_env_file_keeps_existing_conda_packages() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
     let prefix = tmp.path().join("env");
-    seed_repodata_cache(
+    seed_repodata_cache_with_options(
         tmp_home.path(),
         &["https://conda.anaconda.org/conda-forge"],
-        &[("python", "3.12.0", "0")],
+        &[PackageSeed::new("python", "3.11.9", "0")],
     );
 
     let mut create = Command::cargo_bin("viper").expect("binary exists");
@@ -451,6 +451,14 @@ dependencies:
 "#,
     )
     .expect("write env file");
+    seed_repodata_cache_with_options(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[
+            PackageSeed::new("python", "3.11.9", "0"),
+            PackageSeed::new("python", "3.12.0", "0"),
+        ],
+    );
 
     let mut install = Command::cargo_bin("viper").expect("binary exists");
     install
@@ -469,16 +477,16 @@ dependencies:
         .success();
 
     let records = load_installed_records(&prefix);
-    assert!(
-        records
-            .iter()
-            .any(|pkg| pkg["name"] == "python" && pkg["source"] == "conda")
-    );
+    assert!(records.iter().any(|pkg| {
+        pkg["name"] == "python" && pkg["source"] == "conda" && pkg["version"] == "3.11.9"
+    }));
     assert!(
         records
             .iter()
             .any(|pkg| pkg["name"] == "rich" && pkg["source"] == "pip")
     );
+    let history = fs::read_to_string(prefix.join("conda-meta").join("history")).expect("history");
+    assert!(!history.contains("+ python-3.12.0-0"));
 }
 
 #[test]
@@ -614,6 +622,115 @@ fn list_explicit_uses_record_hashes() {
         .expect("explicit output lines");
     assert!(lines.iter().filter_map(Value::as_str).any(|line| {
         line.ends_with("#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    }));
+}
+
+#[test]
+fn remove_non_installed_package_fails() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["error"], "package 'numpy' is not installed");
+}
+
+#[test]
+fn remove_history_uses_dist_names_in_revisions() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--revisions",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let revisions = body["data"]["revisions"].as_array().expect("revisions");
+    assert!(revisions.iter().any(|rev| {
+        rev["remove"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|v| v == "numpy-2.0.0-0"))
     }));
 }
 
