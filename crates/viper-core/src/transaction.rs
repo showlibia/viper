@@ -211,10 +211,7 @@ impl PrefixSnapshot {
             return Ok(Self::MissingPrefix);
         }
         let mut entries = Vec::new();
-        let meta_dir = prefix.join("conda-meta");
-        if meta_dir.exists() {
-            collect_entries(prefix, &meta_dir, &mut entries)?;
-        }
+        collect_entries(prefix, prefix, &mut entries)?;
         Ok(Self::Existing { entries })
     }
 
@@ -227,11 +224,10 @@ impl PrefixSnapshot {
                 Ok(())
             }
             Self::Existing { entries } => {
-                let meta_dir = prefix.join("conda-meta");
-                if meta_dir.exists() {
-                    fs::remove_dir_all(&meta_dir)?;
+                if prefix.exists() {
+                    fs::remove_dir_all(prefix)?;
                 }
-                fs::create_dir_all(&meta_dir)?;
+                fs::create_dir_all(prefix)?;
                 let mut dirs = entries
                     .iter()
                     .filter_map(|entry| {
@@ -244,6 +240,9 @@ impl PrefixSnapshot {
                     .collect::<Vec<_>>();
                 dirs.sort_by_key(|path| path.components().count());
                 for rel in dirs {
+                    if rel.as_os_str().is_empty() {
+                        continue;
+                    }
                     fs::create_dir_all(prefix.join(rel))?;
                 }
                 for entry in entries {

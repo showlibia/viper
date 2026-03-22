@@ -1785,6 +1785,49 @@ fn create_dry_run_does_not_write_prefix_state() {
 }
 
 #[test]
+fn create_failure_rolls_back_existing_prefix_layout() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("existing-prefix");
+    fs::create_dir_all(&prefix).expect("create existing prefix");
+    fs::write(prefix.join("keep.txt"), "keep").expect("write keep marker");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .env("VIPER_TX_FAIL_POINT", "before_persist")
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("transaction failed"))
+    );
+    assert!(prefix.join("keep.txt").exists());
+    assert!(!prefix.join("conda-meta").exists());
+    assert!(!prefix.join("bin").exists());
+    assert!(!prefix.join("pkgs").exists());
+}
+
+#[test]
 fn install_dry_run_does_not_write_state_or_history() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
@@ -2007,10 +2050,136 @@ fn remove_dry_run_does_not_write_state_or_history() {
 
     let after_history =
         fs::read_to_string(prefix.join("conda-meta").join("history")).expect("read history");
-    let after_names = installed_package_names(&prefix);
+    let mut after_names = installed_package_names(&prefix);
+    let mut before_names = before_names;
+    before_names.sort();
+    after_names.sort();
     assert_eq!(before_history, after_history);
     assert_eq!(before_names, after_names);
     assert!(after_names.iter().any(|name| name == "numpy"));
+}
+
+#[test]
+fn remove_failure_after_persist_rolls_back_state_and_history() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let before_history =
+        fs::read_to_string(prefix.join("conda-meta").join("history")).expect("read history");
+    let before_names = installed_package_names(&prefix);
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .env("VIPER_TX_FAIL_POINT", "after_persist")
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("transaction failed"))
+    );
+
+    let after_history =
+        fs::read_to_string(prefix.join("conda-meta").join("history")).expect("read history");
+    let mut after_names = installed_package_names(&prefix);
+    let mut before_names = before_names;
+    before_names.sort();
+    after_names.sort();
+    assert_eq!(before_history, after_history);
+    assert_eq!(before_names, after_names);
+    assert!(after_names.iter().any(|name| name == "numpy"));
+}
+
+#[test]
+fn remove_real_history_io_failure_rolls_back_state() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let history_path = prefix.join("conda-meta").join("history");
+    fs::remove_file(&history_path).expect("remove history file");
+    fs::create_dir_all(&history_path).expect("create history dir");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("Is a directory"))
+    );
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "numpy"));
+    assert!(names.iter().any(|name| name == "python"));
 }
 
 #[test]
