@@ -1997,9 +1997,8 @@ fn install_prefers_viper_target_prefix_over_conda_prefix_non_print_path() {
 }
 
 #[test]
-fn create_from_env_file_without_name_uses_file_stem_for_prefix() {
+fn create_from_env_file_without_name_requires_explicit_target() {
     let tmp = tempdir().expect("create temp dir");
-    let tmp_home = tempdir().expect("create temp home");
     let spec_file = tmp.path().join("env-stem.yaml");
     fs::write(
         &spec_file,
@@ -2009,34 +2008,26 @@ dependencies:
 "#,
     )
     .expect("write env file");
-    seed_repodata_cache(
-        tmp_home.path(),
-        &["https://conda.anaconda.org/conda-forge"],
-        &[("python", "3.12.0", "0")],
-    );
 
     let mut create = Command::cargo_bin("viper").expect("binary exists");
     let output = create
-        .env("HOME", tmp_home.path())
         .args([
             "--no-rc",
             "create",
-            "--offline",
+            "--print-config-only",
             "-f",
             spec_file.to_str().expect("utf8"),
             "--json",
         ])
         .assert()
-        .success()
+        .failure()
         .get_output()
         .stdout
         .clone();
     let body: Value = serde_json::from_slice(&output).expect("valid json");
-
-    let expected_prefix = tmp_home.path().join(".viper").join("envs").join("env-stem");
     assert_eq!(
-        body["data"]["target_prefix"],
-        expected_prefix.display().to_string()
+        body["error"],
+        "target prefix is required: pass --prefix or --name"
     );
 }
 
@@ -2417,6 +2408,34 @@ dependencies:
     assert_eq!(
         body["data"]["target_prefix"],
         expected_prefix.display().to_string()
+    );
+}
+
+#[test]
+fn install_print_config_only_without_target_falls_back_to_root_prefix() {
+    let tmp_home = tempdir().expect("create temp home");
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    let output = install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "install",
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["message"], "config rendered");
+    assert_eq!(
+        body["data"]["target_prefix"],
+        tmp_home.path().join(".viper").display().to_string()
     );
 }
 

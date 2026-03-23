@@ -26,7 +26,6 @@ struct NormalizedRequestInputs {
     explicit_mode: bool,
     pip_specs: Vec<String>,
     yaml_name: Option<String>,
-    yaml_file_stem: Option<String>,
     channels: Vec<String>,
     warnings: Vec<String>,
 }
@@ -62,7 +61,6 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 &globals,
                 &config.root_prefix,
                 normalized.yaml_name.as_deref(),
-                normalized.yaml_file_stem.as_deref(),
             )?;
             if globals.print_config_only {
                 let mut result = OperationResult::ok(
@@ -177,6 +175,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 &config.root_prefix,
                 config.target_prefix.clone(),
                 normalized.yaml_name.as_deref(),
+                globals.print_config_only,
             )?;
             if globals.print_config_only {
                 let mut result = OperationResult::ok(
@@ -565,7 +564,6 @@ fn normalize_request_inputs(
     let mut explicit_mode = false;
     let mut pip_specs = Vec::new();
     let mut yaml_name = None;
-    let mut yaml_file_stem = None;
     let mut yaml_channels = Vec::new();
     let mut warnings = Vec::new();
     let mut file_kind_group: Option<FileSpecKindGroup> = None;
@@ -633,15 +631,6 @@ fn normalize_request_inputs(
                 _ => {}
             }
         }
-
-        if yaml_file_stem.is_none() {
-            yaml_file_stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned);
-        }
     }
 
     maybe_warn_cli_name_override(cli_name, yaml_name.as_deref(), &mut warnings);
@@ -665,7 +654,6 @@ fn normalize_request_inputs(
         explicit_mode,
         pip_specs,
         yaml_name,
-        yaml_file_stem,
         channels: effective_channels(base_channels, cli_channels, &yaml_channels),
         warnings,
     })
@@ -791,7 +779,6 @@ fn render_normalized_request_view(
         "pip_specs": normalized.pip_specs,
         "channels": normalized.channels,
         "yaml_name": normalized.yaml_name,
-        "yaml_file_stem": normalized.yaml_file_stem,
     })
 }
 
@@ -799,7 +786,6 @@ fn resolve_create_target_prefix(
     globals: &crate::types::CliGlobalOptions,
     root_prefix: &std::path::Path,
     yaml_name: Option<&str>,
-    yaml_file_stem: Option<&str>,
 ) -> Result<std::path::PathBuf, CoreError> {
     globals
         .prefix
@@ -811,7 +797,6 @@ fn resolve_create_target_prefix(
                 .map(|name| name_to_target_prefix(root_prefix, name))
         })
         .or_else(|| yaml_name.map(|name| name_to_target_prefix(root_prefix, name)))
-        .or_else(|| yaml_file_stem.map(|name| name_to_target_prefix(root_prefix, name)))
         .or_else(|| {
             std::env::var_os("VIPER_TARGET_PREFIX")
                 .or_else(|| std::env::var_os("CONDA_PREFIX"))
@@ -825,6 +810,7 @@ fn resolve_install_target_prefix(
     root_prefix: &std::path::Path,
     config_target_prefix: Option<std::path::PathBuf>,
     yaml_name: Option<&str>,
+    print_config_only: bool,
 ) -> Result<std::path::PathBuf, CoreError> {
     globals
         .prefix
@@ -837,6 +823,7 @@ fn resolve_install_target_prefix(
         })
         .or_else(|| yaml_name.map(|name| name_to_target_prefix(root_prefix, name)))
         .or(config_target_prefix)
+        .or_else(|| print_config_only.then(|| root_prefix.to_path_buf()))
         .ok_or(CoreError::MissingTargetPrefix)
 }
 
