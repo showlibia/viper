@@ -28,6 +28,29 @@ pub struct RepoPackage {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepodataSource {
+    Current,
+    Full,
+    Shards,
+    Zstd,
+}
+
+impl RepodataSource {
+    pub fn filename(self) -> &'static str {
+        match self {
+            Self::Current => "current_repodata.json",
+            Self::Full => "repodata.json",
+            Self::Shards => "repodata_shards.msgpack.zst",
+            Self::Zstd => "repodata.json.zst",
+        }
+    }
+
+    fn is_json(self) -> bool {
+        matches!(self, Self::Current | Self::Full)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RepodataRecord {
     name: String,
@@ -70,8 +93,14 @@ pub fn fetch_packages(
     offline: bool,
     cache_root: &Path,
     local_repodata_ttl: usize,
-    repodata_filename: &str,
+    repodata_source: RepodataSource,
 ) -> Result<Vec<RepoPackage>, CoreError> {
+    if !repodata_source.is_json() {
+        return Err(CoreError::InvalidRepodata(format!(
+            "repodata source '{}' is reserved but not yet implemented",
+            repodata_source.filename()
+        )));
+    }
     let client = if offline {
         None
     } else {
@@ -94,7 +123,7 @@ pub fn fetch_packages(
                 offline,
                 cache_root,
                 local_repodata_ttl,
-                repodata_filename,
+                repodata_source,
             )?;
             out.extend(parse_records(&normalized, subdir, entry));
         }
@@ -109,8 +138,9 @@ fn fetch_subdir(
     offline: bool,
     cache_root: &Path,
     local_repodata_ttl: usize,
-    repodata_filename: &str,
+    repodata_source: RepodataSource,
 ) -> Result<RepodataFile, CoreError> {
+    let repodata_filename = repodata_source.filename();
     let url = format!("{channel}/{subdir}/{repodata_filename}");
     let paths = cache_paths(cache_root, &url);
     let cached_json = read_cached_json(&paths.json)?;
@@ -475,7 +505,7 @@ mod tests {
             true,
             &cache_root,
             1,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect("must load from cache");
         assert!(pkgs.iter().any(|p| p.name == "python"));
@@ -493,6 +523,38 @@ mod tests {
         );
         assert_ne!(full.json, current.json);
         assert_ne!(full.meta, current.meta);
+    }
+
+    #[test]
+    fn repodata_source_names_reserve_shards_and_zstd_variants() {
+        assert_eq!(RepodataSource::Current.filename(), "current_repodata.json");
+        assert_eq!(RepodataSource::Full.filename(), "repodata.json");
+        assert_eq!(
+            RepodataSource::Shards.filename(),
+            "repodata_shards.msgpack.zst"
+        );
+        assert_eq!(RepodataSource::Zstd.filename(), "repodata.json.zst");
+    }
+
+    #[test]
+    fn reserved_repodata_sources_fail_with_explicit_error() {
+        let cache_root = PathBuf::from("/tmp/cache");
+        let err = fetch_packages(
+            &[],
+            "linux-64",
+            true,
+            &cache_root,
+            1,
+            RepodataSource::Shards,
+        )
+        .expect_err("reserved shards source should reject");
+        match err {
+            CoreError::InvalidRepodata(msg) => {
+                assert!(msg.contains("reserved"));
+                assert!(msg.contains("repodata_shards.msgpack.zst"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]
@@ -563,7 +625,7 @@ mod tests {
             false,
             &cache_root,
             0,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect("online fetch");
         assert!(packages.iter().any(|p| p.name == "python"));
@@ -599,7 +661,7 @@ mod tests {
             false,
             &cache_root,
             1,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect("must use fresh cache");
         assert!(packages.iter().any(|p| p.name == "python"));
@@ -660,7 +722,7 @@ mod tests {
             false,
             &cache_root,
             0,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect("304 path should use cache");
         assert!(packages.iter().any(|p| p.name == "python"));
@@ -705,7 +767,7 @@ mod tests {
             false,
             &cache_with,
             0,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect("fallback to cache on 5xx");
         assert!(fallback.iter().any(|p| p.name == "python"));
@@ -717,7 +779,7 @@ mod tests {
             false,
             &tmp_without_cache.path().join("cache"),
             0,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect_err("must fail without cache");
         match err {
@@ -751,7 +813,7 @@ mod tests {
             true,
             &cache_root,
             1,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect_err("malformed state must fail");
         match err {
@@ -784,7 +846,7 @@ mod tests {
             true,
             &cache_root,
             1,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect_err("missing state metadata must fail");
         match err {
@@ -818,7 +880,7 @@ mod tests {
             true,
             &cache_root,
             1,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect_err("metadata without json must fail");
         match err {
@@ -857,7 +919,7 @@ mod tests {
             true,
             &cache_root,
             1,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect_err("url mismatch must fail");
         match err {
@@ -891,7 +953,7 @@ mod tests {
             true,
             &cache_root,
             1,
-            "current_repodata.json",
+            RepodataSource::Current,
         )
         .expect_err("malformed cached repodata must fail");
         match err {

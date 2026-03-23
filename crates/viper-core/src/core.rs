@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::config::{ConfigInput, ConfigStore, build_config, name_to_target_prefix};
 use crate::error::CoreError;
-use crate::repodata::{RepoPackage, fetch_packages};
+use crate::repodata::{RepoPackage, RepodataSource, fetch_packages};
 use crate::solver::{SolveOptions, solve_to_actions, spec_requires_full_repodata};
 use crate::spec::{
     SpecFileKind, normalize_spec, package_name_from_spec, parse_explicit_url, parse_match_spec,
@@ -81,7 +81,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     None::<Vec<String>>,
                 )
             } else {
-                let repodata_filename = select_repodata_filename(&normalized.conda_specs);
+                let repodata_source = select_repodata_source(&normalized.conda_specs);
                 let repodata = if normalized.conda_specs.is_empty() {
                     Vec::new()
                 } else {
@@ -91,7 +91,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         config.offline,
                         &config.root_prefix.join("pkgs").join("cache"),
                         config.local_repodata_ttl,
-                        repodata_filename,
+                        repodata_source,
                     )?
                 };
                 let solve_options = SolveOptions {
@@ -207,7 +207,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 solve_specs.extend(normalized.conda_specs.clone());
                 let solve_specs = dedup_specs(solve_specs);
 
-                let repodata_filename = select_repodata_filename(&solve_specs);
+                let repodata_source = select_repodata_source(&solve_specs);
                 let repodata = if solve_specs.is_empty() {
                     Vec::new()
                 } else {
@@ -217,7 +217,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         config.offline,
                         &config.root_prefix.join("pkgs").join("cache"),
                         config.local_repodata_ttl,
-                        repodata_filename,
+                        repodata_source,
                     )?;
                     inject_installed_candidates(&mut repodata, &state.conda_packages());
                     repodata
@@ -897,11 +897,11 @@ fn current_platform_subdir() -> String {
     }
 }
 
-fn select_repodata_filename(specs: &[String]) -> &'static str {
+fn select_repodata_source(specs: &[String]) -> RepodataSource {
     if specs.iter().any(|spec| spec_requires_full_repodata(spec)) {
-        "repodata.json"
+        RepodataSource::Full
     } else {
-        "current_repodata.json"
+        RepodataSource::Current
     }
 }
 
