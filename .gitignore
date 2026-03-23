@@ -1,3 +1,4 @@
 /target
 mamba/
 .humanize*
+docs/rust-mamba-plan.md
