@@ -159,16 +159,18 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             Ok(result)
         }
         CliOperation::Install { specs, files } => {
-            let target_prefix = config
-                .target_prefix
-                .clone()
-                .ok_or(CoreError::MissingTargetPrefix)?;
             let normalized = normalize_request_inputs(
                 specs,
                 files,
                 &config.channels,
                 &globals.channels,
                 globals.name.as_deref(),
+            )?;
+            let target_prefix = resolve_install_target_prefix(
+                &globals,
+                &config.root_prefix,
+                config.target_prefix.clone(),
+                normalized.yaml_name.as_deref(),
             )?;
             if globals.print_config_only {
                 let mut result = OperationResult::ok(
@@ -817,6 +819,26 @@ fn resolve_create_target_prefix(
                 .or_else(|| std::env::var_os("CONDA_PREFIX"))
                 .map(std::path::PathBuf::from)
         })
+        .ok_or(CoreError::MissingTargetPrefix)
+}
+
+fn resolve_install_target_prefix(
+    globals: &crate::types::CliGlobalOptions,
+    root_prefix: &std::path::Path,
+    config_target_prefix: Option<std::path::PathBuf>,
+    yaml_name: Option<&str>,
+) -> Result<std::path::PathBuf, CoreError> {
+    globals
+        .prefix
+        .clone()
+        .or_else(|| {
+            globals
+                .name
+                .as_ref()
+                .map(|name| root_prefix.join("envs").join(name))
+        })
+        .or_else(|| yaml_name.map(|name| root_prefix.join("envs").join(name)))
+        .or(config_target_prefix)
         .ok_or(CoreError::MissingTargetPrefix)
 }
 
