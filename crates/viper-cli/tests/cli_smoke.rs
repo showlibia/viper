@@ -4864,6 +4864,46 @@ fn offline_restrictive_spec_requires_full_repodata_cache() {
 }
 
 #[test]
+fn offline_restrictive_build_channel_subdir_and_hash_specs_require_full_repodata_cache() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let channel = "https://conda.anaconda.org/conda-forge";
+    seed_named_repodata_cache(
+        tmp_home.path(),
+        channel,
+        "current_repodata.json",
+        &[("python", "3.12.0", "0")],
+    );
+    let platform = current_platform_subdir();
+    let restrictive_specs = [
+        "python[build=\"0\"]".to_string(),
+        "conda-forge::python>=3.11".to_string(),
+        format!("python[subdir={platform}]"),
+        "python[md5=deadbeefdeadbeefdeadbeefdeadbeef]".to_string(),
+    ];
+
+    for spec in restrictive_specs {
+        let mut create = Command::cargo_bin("viper").expect("binary exists");
+        create
+            .env("HOME", tmp_home.path())
+            .args([
+                "--no-rc",
+                "create",
+                "--offline",
+                "--dry-run",
+                "-p",
+                prefix.to_str().expect("utf8"),
+                spec.as_str(),
+                "--json",
+            ])
+            .assert()
+            .failure()
+            .stdout(contains("offline mode requires a cached repodata index"));
+    }
+}
+
+#[test]
 fn offline_restrictive_spec_uses_full_repodata_when_available() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");

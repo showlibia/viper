@@ -815,5 +815,14 @@ mod tests {
         assert!(!spec_requires_full_repodata("python>=3.11"));
         assert!(spec_requires_full_repodata("python<3.10"));
         assert!(spec_requires_full_repodata("numpy=1.26"));
+        assert!(spec_requires_full_repodata("python[build=\"py311_*\"]"));
+        assert!(spec_requires_full_repodata("conda-forge::python>=3.11"));
+        assert!(spec_requires_full_repodata("python[subdir=linux-64]"));
+        assert!(spec_requires_full_repodata(
+            "python[md5=deadbeefdeadbeefdeadbeefdeadbeef]"
+        ));
+        assert!(spec_requires_full_repodata(
+            "python[sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef]"
+        ));
     }
 }
