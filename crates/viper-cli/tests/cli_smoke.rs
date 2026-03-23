@@ -2699,6 +2699,100 @@ fn create_rejects_mixed_file_spec_types() {
 }
 
 #[test]
+fn create_rejects_mixed_explicit_and_yaml_regardless_of_order() {
+    let tmp = tempdir().expect("create temp dir");
+    let subdir = current_platform_subdir();
+    let explicit = tmp.path().join("spec.explicit");
+    let yaml = tmp.path().join("env.yaml");
+    fs::write(
+        &explicit,
+        format!(
+            "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2\n"
+        ),
+    )
+    .expect("write explicit");
+    fs::write(&yaml, "dependencies:\n  - python\n").expect("write yaml");
+
+    for pair in [(&explicit, &yaml), (&yaml, &explicit)] {
+        let mut create = Command::cargo_bin("viper").expect("binary exists");
+        let output = create
+            .args([
+                "--no-rc",
+                "--print-config-only",
+                "create",
+                "-n",
+                "mix",
+                "-f",
+                pair.0.to_str().expect("utf8"),
+                "-f",
+                pair.1.to_str().expect("utf8"),
+                "--json",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let body: Value = serde_json::from_slice(&output).expect("valid json");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("same format group"))
+        );
+    }
+}
+
+#[test]
+fn create_rejects_mixed_explicit_and_lockfile_regardless_of_order() {
+    let tmp = tempdir().expect("create temp dir");
+    let subdir = current_platform_subdir();
+    let explicit = tmp.path().join("spec.explicit");
+    let lock = tmp.path().join("lock.json");
+    fs::write(
+        &explicit,
+        format!(
+            "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2\n"
+        ),
+    )
+    .expect("write explicit");
+    fs::write(
+        &lock,
+        format!(
+            r#"{{"lockVersion":1,"packages":{{"numpy-2.0.0-0.tar.bz2":{{"name":"numpy","version":"2.0.0","build":"0","subdir":"{subdir}","channel":"conda-forge"}}}}}}"#
+        ),
+    )
+    .expect("write lock");
+
+    for pair in [(&explicit, &lock), (&lock, &explicit)] {
+        let mut create = Command::cargo_bin("viper").expect("binary exists");
+        let output = create
+            .args([
+                "--no-rc",
+                "--print-config-only",
+                "create",
+                "-n",
+                "mix",
+                "-f",
+                pair.0.to_str().expect("utf8"),
+                "-f",
+                pair.1.to_str().expect("utf8"),
+                "--json",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let body: Value = serde_json::from_slice(&output).expect("valid json");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("same format group"))
+        );
+    }
+}
+
+#[test]
 fn create_allows_classic_and_explicit_file_combo() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
@@ -3356,6 +3450,146 @@ fn install_rejects_mixed_lockfile_and_classic_files() {
             .as_str()
             .is_some_and(|msg| msg.contains("same format group"))
     );
+}
+
+#[test]
+fn install_rejects_mixed_explicit_and_yaml_regardless_of_order() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let subdir = current_platform_subdir();
+    let explicit = tmp.path().join("spec.explicit");
+    let yaml = tmp.path().join("env.yaml");
+    fs::write(
+        &explicit,
+        format!(
+            "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2\n"
+        ),
+    )
+    .expect("write explicit");
+    fs::write(&yaml, "dependencies:\n  - python\n").expect("write yaml");
+
+    for pair in [(&explicit, &yaml), (&yaml, &explicit)] {
+        let mut install = Command::cargo_bin("viper").expect("binary exists");
+        let output = install
+            .env("HOME", tmp_home.path())
+            .args([
+                "--no-rc",
+                "--print-config-only",
+                "install",
+                "-p",
+                prefix.to_str().expect("utf8"),
+                "-f",
+                pair.0.to_str().expect("utf8"),
+                "-f",
+                pair.1.to_str().expect("utf8"),
+                "--json",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let body: Value = serde_json::from_slice(&output).expect("valid json");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("same format group"))
+        );
+    }
+}
+
+#[test]
+fn install_rejects_mixed_explicit_and_lockfile_regardless_of_order() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let subdir = current_platform_subdir();
+    let explicit = tmp.path().join("spec.explicit");
+    let lock = tmp.path().join("lock.json");
+    fs::write(
+        &explicit,
+        format!(
+            "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2\n"
+        ),
+    )
+    .expect("write explicit");
+    fs::write(
+        &lock,
+        format!(
+            r#"{{"lockVersion":1,"packages":{{"numpy-2.0.0-0.tar.bz2":{{"name":"numpy","version":"2.0.0","build":"0","subdir":"{subdir}","channel":"conda-forge"}}}}}}"#
+        ),
+    )
+    .expect("write lock");
+
+    for pair in [(&explicit, &lock), (&lock, &explicit)] {
+        let mut install = Command::cargo_bin("viper").expect("binary exists");
+        let output = install
+            .env("HOME", tmp_home.path())
+            .args([
+                "--no-rc",
+                "--print-config-only",
+                "install",
+                "-p",
+                prefix.to_str().expect("utf8"),
+                "-f",
+                pair.0.to_str().expect("utf8"),
+                "-f",
+                pair.1.to_str().expect("utf8"),
+                "--json",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let body: Value = serde_json::from_slice(&output).expect("valid json");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("same format group"))
+        );
+    }
 }
 
 #[test]

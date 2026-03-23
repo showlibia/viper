@@ -570,6 +570,7 @@ fn normalize_request_inputs(
     let mut yaml_channels = Vec::new();
     let mut warnings = Vec::new();
     let mut file_kind_group: Option<FileSpecKindGroup> = None;
+    let mut parsed_files = Vec::new();
 
     for path in files {
         let parsed = parse_spec_file(&path)?;
@@ -588,7 +589,10 @@ fn normalize_request_inputs(
         } else {
             file_kind_group = Some(current_group);
         }
+        parsed_files.push((path, parsed));
+    }
 
+    for (path, parsed) in parsed_files {
         if parsed.kind == SpecFileKind::Explicit {
             explicit_mode = true;
             explicit_specs = parsed.env.conda_specs;
