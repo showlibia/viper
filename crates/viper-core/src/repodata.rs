@@ -558,6 +558,20 @@ mod tests {
     }
 
     #[test]
+    fn reserved_zstd_source_fails_with_explicit_error() {
+        let cache_root = PathBuf::from("/tmp/cache");
+        let err = fetch_packages(&[], "linux-64", true, &cache_root, 1, RepodataSource::Zstd)
+            .expect_err("reserved zstd source should reject");
+        match err {
+            CoreError::InvalidRepodata(msg) => {
+                assert!(msg.contains("reserved"));
+                assert!(msg.contains("repodata.json.zst"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
     fn cache_name_matches_mamba_style_hash_shape() {
         let url = "https://conda.anaconda.org/conda-forge/linux-64/current_repodata.json";
         let key = cache_name_from_url(url);

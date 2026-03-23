@@ -4741,6 +4741,43 @@ fn offline_without_cache_fails() {
 }
 
 #[test]
+fn offline_fails_when_cached_state_metadata_is_malformed() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let channel = "https://conda.anaconda.org/conda-forge";
+    seed_named_repodata_cache(
+        tmp_home.path(),
+        channel,
+        "current_repodata.json",
+        &[("python", "3.12.0", "0")],
+    );
+
+    let cache_root = tmp_home.path().join(".viper").join("pkgs").join("cache");
+    let subdir = current_platform_subdir();
+    let key = cache_name_from_repodata_url(&format!("{channel}/{subdir}/current_repodata.json"));
+    fs::write(cache_root.join(format!("{key}.state.json")), "{not-json")
+        .expect("corrupt state metadata");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "--dry-run",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python>=3.11",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(contains("invalid repodata cache metadata"));
+}
+
+#[test]
 fn offline_with_cache_works() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
