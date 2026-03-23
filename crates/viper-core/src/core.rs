@@ -364,7 +364,8 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 }
                 let solve_specs = dedup_specs(keep_requested.into_values().collect::<Vec<_>>());
                 if solve_specs.is_empty() {
-                    removal_preview
+                    let mut prune_preview = state.clone();
+                    prune_preview.remove_specs(&specs, true, &HashSet::new())?
                 } else {
                     let preview_non_conda_unlinks = removal_preview
                         .iter()
