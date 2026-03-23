@@ -862,7 +862,17 @@ mod tests {
             solve_to_actions(&specs, std::slice::from_ref(&python), &opts).expect("direct solve");
         let via_production =
             solve_with_production_solver(&specs, &[python], &opts).expect("production solve");
-        assert_eq!(direct.actions.len(), via_production.actions.len());
+        let direct_actions = direct
+            .actions
+            .iter()
+            .map(|a| (&a.name, &a.version, &a.build, &a.channel, &a.url))
+            .collect::<Vec<_>>();
+        let production_actions = via_production
+            .actions
+            .iter()
+            .map(|a| (&a.name, &a.version, &a.build, &a.channel, &a.url))
+            .collect::<Vec<_>>();
+        assert_eq!(direct_actions, production_actions);
         assert_eq!(direct.trace, via_production.trace);
     }
 }

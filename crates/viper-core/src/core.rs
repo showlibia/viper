@@ -7,7 +7,10 @@ use serde_json::json;
 use crate::config::{ConfigInput, ConfigStore, build_config, name_to_target_prefix};
 use crate::error::CoreError;
 use crate::repodata::{RepoPackage, RepodataSource, fetch_packages};
-use crate::solver::{SolveOptions, solve_with_production_solver, spec_requires_full_repodata};
+use crate::solver::{
+    SolveOptions, SolveResult, production_solver_engine, solve_with_production_solver,
+    spec_requires_full_repodata,
+};
 use crate::spec::{
     SpecFileKind, normalize_spec, package_name_from_spec, parse_explicit_url, parse_match_spec,
     parse_spec_file,
@@ -100,12 +103,11 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     installed_preferred: HashMap::new(),
                     user_requested: requested_names(&normalized.conda_specs),
                 };
-                let solved = solve_with_production_solver(
+                let solved = solve_with_production_entry(
                     &normalized.conda_specs,
                     &repodata,
                     &solve_options,
-                )
-                .map_err(CoreError::UnsatisfiedSpecs)?;
+                )?;
                 (solved.actions, Some(solved.trace))
             };
             let conda_plan = TransactionPlan::from_solved(&[], &conda_link_actions);
@@ -236,8 +238,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         .collect(),
                     user_requested: requested_names(&normalized.conda_specs),
                 };
-                let solved = solve_with_production_solver(&solve_specs, &repodata, &solve_options)
-                    .map_err(CoreError::UnsatisfiedSpecs)?;
+                let solved = solve_with_production_entry(&solve_specs, &repodata, &solve_options)?;
                 (solved.actions, Some(solved.trace))
             };
             let conda_plan = if normalized.explicit_mode {
@@ -391,8 +392,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         .collect(),
                     user_requested: requested_names(&solve_specs),
                 };
-                let solved = solve_with_production_solver(&solve_specs, &repodata, &solve_options)
-                    .map_err(CoreError::UnsatisfiedSpecs)?;
+                let solved = solve_with_production_entry(&solve_specs, &repodata, &solve_options)?;
                 let solved_plan = TransactionPlan::from_solved(&state.packages, &solved.actions);
                 let mut unlink = solved_plan.unlink;
                 for planned in preview_non_conda_unlinks {
@@ -909,6 +909,15 @@ fn select_repodata_source(specs: &[String]) -> RepodataSource {
     }
 }
 
+fn solve_with_production_entry(
+    specs: &[String],
+    repodata: &[RepoPackage],
+    options: &SolveOptions,
+) -> Result<SolveResult, CoreError> {
+    let _engine = production_solver_engine();
+    solve_with_production_solver(specs, repodata, options).map_err(CoreError::UnsatisfiedSpecs)
+}
+
 fn render_list_output(
     mut packages: Vec<PackageRecord>,
     options: &ListOptions,
@@ -1147,4 +1156,39 @@ fn fallback_keep_specs_without_requested_map(
         .map(|pkg| format!("{}=={}", pkg.name, pkg.version))
         .collect::<Vec<_>>();
     dedup_specs(keep_specs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_production_solver_entry_returns_expected_action() {
+        let pkg = RepoPackage {
+            name: "python".to_string(),
+            version: "3.12.2".to_string(),
+            build: "0".to_string(),
+            build_number: 0,
+            subdir: "linux-64".to_string(),
+            filename: "python-3.12.2-0.conda".to_string(),
+            depends: Vec::new(),
+            constrains: Vec::new(),
+            md5: None,
+            sha256: None,
+            channel: "https://conda.anaconda.org/conda-forge".to_string(),
+            base_url: "https://conda.anaconda.org/conda-forge".to_string(),
+            url: "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.2-0.conda"
+                .to_string(),
+        };
+        let opts = SolveOptions {
+            channels: vec!["conda-forge".to_string()],
+            strict_channel_priority: false,
+            installed_preferred: HashMap::new(),
+            user_requested: HashSet::from(["python".to_string()]),
+        };
+        let solved = solve_with_production_entry(&["python>=3.11".to_string()], &[pkg], &opts)
+            .expect("solve via core production entry");
+        assert_eq!(solved.actions.len(), 1);
+        assert_eq!(solved.actions[0].name, "python");
+    }
 }
