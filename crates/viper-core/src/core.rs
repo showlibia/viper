@@ -558,7 +558,8 @@ fn normalize_request_inputs(
     cli_channels: &[String],
     cli_name: Option<&str>,
 ) -> Result<NormalizedRequestInputs, CoreError> {
-    let mut conda_specs = normalize_and_validate_match_specs(cli_specs)?;
+    let cli_specs_len = cli_specs.len();
+    let mut conda_specs = cli_specs;
     let mut explicit_specs = Vec::new();
     let mut explicit_mode = false;
     let mut pip_specs = Vec::new();
@@ -647,6 +648,14 @@ fn normalize_request_inputs(
         for spec in &conda_specs {
             parse_match_spec(spec)?;
         }
+    }
+
+    if !explicit_mode && cli_specs_len > 0 {
+        let mut validated_cli = normalize_and_validate_match_specs(
+            conda_specs.iter().take(cli_specs_len).cloned().collect(),
+        )?;
+        validated_cli.extend(conda_specs.into_iter().skip(cli_specs_len));
+        conda_specs = validated_cli;
     }
 
     Ok(NormalizedRequestInputs {

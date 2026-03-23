@@ -78,11 +78,6 @@ pub struct ExplicitUrlInfo {
 
 pub fn parse_explicit_url(url: &str) -> Result<ExplicitUrlInfo, CoreError> {
     let normalized = normalize_spec(url)?;
-    if !normalized.starts_with("http://") && !normalized.starts_with("https://") {
-        return Err(CoreError::InvalidEnvironmentFile(format!(
-            "explicit entry must be a URL: {normalized}"
-        )));
-    }
     let (url_no_fragment, fragment) = normalized
         .split_once('#')
         .map_or((normalized.as_str(), ""), |parts| parts);
@@ -93,7 +88,7 @@ pub fn parse_explicit_url(url: &str) -> Result<ExplicitUrlInfo, CoreError> {
         .next()
         .ok_or_else(|| {
             CoreError::InvalidEnvironmentFile(format!(
-                "explicit entry has invalid URL: {normalized}"
+                "explicit entry has invalid path: {normalized}"
             ))
         })?
         .to_string();
@@ -128,10 +123,10 @@ pub fn parse_explicit_url(url: &str) -> Result<ExplicitUrlInfo, CoreError> {
         .to_string();
 
     let (prefix, _) = url_no_fragment.rsplit_once('/').ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {normalized}"))
+        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid path: {normalized}"))
     })?;
     let (base_url, subdir) = prefix.rsplit_once('/').ok_or_else(|| {
-        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid URL: {normalized}"))
+        CoreError::InvalidEnvironmentFile(format!("explicit entry has invalid path: {normalized}"))
     })?;
     let base_url = base_url.to_string();
     let subdir = subdir.to_string();
@@ -814,5 +809,21 @@ package:
         assert_eq!(parsed.name, "python");
         assert_eq!(parsed.version, "3.12.0");
         assert_eq!(parsed.build, "0");
+    }
+
+    #[test]
+    fn parse_explicit_url_accepts_file_scheme_and_local_paths() {
+        let file_scheme =
+            parse_explicit_url("file:///tmp/local/linux-64/python-3.12.0-0.conda#deadbeef")
+                .expect("parse file scheme");
+        assert_eq!(file_scheme.base_url, "file:///tmp/local");
+        assert_eq!(file_scheme.subdir, "linux-64");
+        assert_eq!(file_scheme.name, "python");
+
+        let local_path =
+            parse_explicit_url("/tmp/local/noarch/zlib-1.2.13-h0.conda").expect("parse local path");
+        assert_eq!(local_path.base_url, "/tmp/local");
+        assert_eq!(local_path.subdir, "noarch");
+        assert_eq!(local_path.name, "zlib");
     }
 }

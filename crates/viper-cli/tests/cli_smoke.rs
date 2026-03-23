@@ -2191,6 +2191,82 @@ fn create_explicit_file_accepts_hash_url() {
 }
 
 #[test]
+fn create_explicit_file_accepts_file_scheme_entries() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let subdir = current_platform_subdir();
+    let explicit = tmp.path().join("explicit-file.txt");
+    fs::write(
+        &explicit,
+        format!("@EXPLICIT\nfile:///tmp/local-chan/{subdir}/python-3.12.0-0.tar.bz2\n"),
+    )
+    .expect("write explicit file entry");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            explicit.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let records = load_installed_records(&prefix);
+    let python = records
+        .iter()
+        .find(|record| record["name"] == "python")
+        .expect("python record");
+    assert_eq!(
+        python["url"],
+        serde_json::json!(format!(
+            "file:///tmp/local-chan/{subdir}/python-3.12.0-0.tar.bz2"
+        ))
+    );
+}
+
+#[test]
+fn create_explicit_file_ignores_invalid_positional_specs() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let subdir = current_platform_subdir();
+    let explicit = tmp.path().join("explicit.txt");
+    fs::write(
+        &explicit,
+        format!(
+            "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2\n"
+        ),
+    )
+    .expect("write explicit");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            explicit.to_str().expect("utf8"),
+            "!bad",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+}
+
+#[test]
 fn install_explicit_does_not_remove_unrelated_packages() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
