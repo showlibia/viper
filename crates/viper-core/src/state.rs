@@ -578,3 +578,28 @@ pub fn ensure_prefix_layout(prefix: &Path) -> Result<(), CoreError> {
 pub fn is_managed_prefix(prefix: &Path) -> bool {
     prefix.join("conda-meta").exists()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_specs_map_uses_matchspec_package_name_keys() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let prefix = tmp.path().join("env");
+        fs::create_dir_all(prefix.join("conda-meta")).expect("create conda-meta");
+        fs::write(
+            prefix.join("conda-meta").join("history"),
+            r#"==> 2026-03-24T00:00:00Z <==
+operation: install
+# install specs: ["conda-forge::python>=3.11"]
++ python-3.12.0-0
+"#,
+        )
+        .expect("write history");
+
+        let requested = EnvironmentState::requested_specs_map(&prefix).expect("parse history");
+        assert!(requested.contains_key("python"));
+        assert!(!requested.contains_key("conda-forge"));
+    }
+}

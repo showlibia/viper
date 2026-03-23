@@ -115,6 +115,8 @@ pub struct TransactionExecutor {
 #[derive(Debug, Clone)]
 pub struct TransactionOutcome {
     pub state: EnvironmentState,
+    pub fetched: usize,
+    pub extracted: usize,
     pub linked: usize,
     pub unlinked: usize,
     pub pip_changed: usize,
@@ -127,14 +129,17 @@ impl TransactionExecutor {
         mut state: EnvironmentState,
         plan: &TransactionPlan,
     ) -> Result<TransactionOutcome, CoreError> {
-        let unlinked = state.remove_conda_unlinks(&plan.unlink);
-        let linked =
-            state.install_conda_links(&plan.link, &self.requested_specs, &self.platform)?;
-        let pip_changed = state.install_pip_specs(&self.pip_specs, &self.platform)?;
-
         if self.dry_run {
+            let fetched = self.run_fetch_phase(plan)?;
+            let extracted = self.run_extract_phase(plan)?;
+            let unlinked = state.remove_conda_unlinks(&plan.unlink);
+            let linked =
+                state.install_conda_links(&plan.link, &self.requested_specs, &self.platform)?;
+            let pip_changed = state.install_pip_specs(&self.pip_specs, &self.platform)?;
             return Ok(TransactionOutcome {
                 state,
+                fetched,
+                extracted,
                 linked,
                 unlinked,
                 pip_changed,
@@ -142,10 +147,46 @@ impl TransactionExecutor {
         }
 
         let snapshot = PrefixSnapshot::capture(prefix)?;
+        let mut fetched = 0usize;
+        let mut extracted = 0usize;
+        let mut unlinked = 0usize;
+        let mut linked = 0usize;
+        let mut pip_changed = 0usize;
         let tx_result = (|| -> Result<(), CoreError> {
             if self.ensure_layout {
                 ensure_prefix_layout(prefix)?;
             }
+
+            fetched = self.run_fetch_phase(plan)?;
+            if should_fail("after_fetch") {
+                return Err(CoreError::TransactionFailed(
+                    "injected failure after fetch phase".to_string(),
+                ));
+            }
+
+            extracted = self.run_extract_phase(plan)?;
+            if should_fail("after_extract") {
+                return Err(CoreError::TransactionFailed(
+                    "injected failure after extract phase".to_string(),
+                ));
+            }
+
+            unlinked = state.remove_conda_unlinks(&plan.unlink);
+            if should_fail("after_unlink") {
+                return Err(CoreError::TransactionFailed(
+                    "injected failure after unlink phase".to_string(),
+                ));
+            }
+
+            linked =
+                state.install_conda_links(&plan.link, &self.requested_specs, &self.platform)?;
+            if should_fail("after_link") {
+                return Err(CoreError::TransactionFailed(
+                    "injected failure after link phase".to_string(),
+                ));
+            }
+
+            pip_changed = state.install_pip_specs(&self.pip_specs, &self.platform)?;
 
             if should_fail("before_persist") {
                 return Err(CoreError::TransactionFailed(
@@ -186,10 +227,30 @@ impl TransactionExecutor {
 
         Ok(TransactionOutcome {
             state,
+            fetched,
+            extracted,
             linked,
             unlinked,
             pip_changed,
         })
+    }
+
+    fn run_fetch_phase(&self, plan: &TransactionPlan) -> Result<usize, CoreError> {
+        if should_fail("before_fetch") {
+            return Err(CoreError::TransactionFailed(
+                "injected failure before fetch phase".to_string(),
+            ));
+        }
+        Ok(plan.fetch.len())
+    }
+
+    fn run_extract_phase(&self, plan: &TransactionPlan) -> Result<usize, CoreError> {
+        if should_fail("before_extract") {
+            return Err(CoreError::TransactionFailed(
+                "injected failure before extract phase".to_string(),
+            ));
+        }
+        Ok(plan.extract.len())
     }
 }
 

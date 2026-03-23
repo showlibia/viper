@@ -52,6 +52,17 @@ pub fn parse_match_spec(spec: &str) -> Result<MatchSpec, CoreError> {
 
 pub fn package_name_from_spec(spec: &str) -> Result<String, CoreError> {
     let normalized = normalize_spec(spec)?;
+    if let Ok(info) = parse_explicit_url(&normalized) {
+        return Ok(info.name);
+    }
+    if let Ok(match_spec) = normalized.parse::<MatchSpec>()
+        && let Some(name) = match_spec
+            .name
+            .as_exact()
+            .map(|name| name.as_normalized().to_string())
+    {
+        return Ok(name);
+    }
     let name: String = normalized
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
@@ -519,6 +530,12 @@ mod tests {
     #[test]
     fn parse_name_from_spec() {
         let name = package_name_from_spec("python>=3.11").expect("valid spec");
+        assert_eq!(name, "python");
+    }
+
+    #[test]
+    fn parse_name_from_channel_qualified_spec() {
+        let name = package_name_from_spec("conda-forge::python>=3.11").expect("valid spec");
         assert_eq!(name, "python");
     }
 

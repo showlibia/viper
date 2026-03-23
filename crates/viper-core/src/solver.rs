@@ -171,10 +171,12 @@ impl DependencyProvider for CondaProvider {
 
         let mut candidates = Vec::with_capacity(filtered.len());
         let mut favored = None;
+        let user_requested = self.options.user_requested.contains(name_str);
         for idx in filtered {
             let solvable = self.pool.intern_solvable(name, idx);
-            if let Some((installed_version, installed_build)) =
-                self.options.installed_preferred.get(name_str)
+            if !user_requested
+                && let Some((installed_version, installed_build)) =
+                    self.options.installed_preferred.get(name_str)
             {
                 let pkg = &self.packages[idx];
                 if &pkg.version == installed_version && &pkg.build == installed_build {
@@ -595,6 +597,41 @@ mod tests {
             .find(|action| action.name == "python")
             .expect("python action");
         assert_eq!(python.version, "3.11");
+    }
+
+    #[test]
+    fn user_requested_root_is_not_pinned_to_installed_build() {
+        let pkgs = vec![
+            pkg(
+                "python",
+                "3.11.0",
+                "0",
+                "https://conda.anaconda.org/conda-forge",
+                "linux-64",
+            ),
+            pkg(
+                "python",
+                "3.12.0",
+                "0",
+                "https://conda.anaconda.org/conda-forge",
+                "linux-64",
+            ),
+        ];
+        let mut opts = options(&["conda-forge"], false);
+        opts.installed_preferred.insert(
+            "python".to_string(),
+            ("3.11.0".to_string(), "0".to_string()),
+        );
+        opts.user_requested.insert("python".to_string());
+
+        let result = solve_to_actions(&["python".to_string()], &pkgs, &opts)
+            .expect("solver must allow requested upgrade");
+        let python = result
+            .actions
+            .iter()
+            .find(|action| action.name == "python")
+            .expect("python action");
+        assert_eq!(python.version, "3.12.0");
     }
 
     #[test]

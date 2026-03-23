@@ -153,7 +153,10 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "pip_specs": normalized.pip_specs,
                     "changed": outcome.linked + outcome.unlinked + outcome.pip_changed,
                     "actions": {
+                        "fetch": conda_plan.fetch,
+                        "extract": conda_plan.extract,
                         "link": link_actions,
+                        "unlink": conda_plan.unlink,
                     },
                     "solver_trace": if config.verbose >= 3 { solver_trace } else { None },
                     "dry_run": config.dry_run,
@@ -287,6 +290,8 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "specs": if normalized.explicit_mode { normalized.explicit_specs.clone() } else { normalized.conda_specs.clone() },
                     "pip_specs": normalized.pip_specs,
                     "actions": {
+                        "fetch": conda_plan.fetch,
+                        "extract": conda_plan.extract,
                         "link": link_actions,
                         "unlink": conda_plan.unlink,
                     },
@@ -428,6 +433,9 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "removed_all": all,
                     "specs": specs,
                     "actions": {
+                        "fetch": remove_plan.fetch,
+                        "extract": remove_plan.extract,
+                        "link": remove_plan.link,
                         "unlink": removed,
                     },
                     "dry_run": config.dry_run,
