@@ -452,7 +452,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             }
 
             let payload = if list_options.revisions {
-                let revisions = EnvironmentState::revisions(&target_prefix).unwrap_or_default();
+                let revisions = EnvironmentState::revisions(&target_prefix)?;
                 json!({
                     "target_prefix": target_prefix,
                     "revisions": revisions,
@@ -812,7 +812,11 @@ fn resolve_create_target_prefix(
         })
         .or_else(|| yaml_name.map(|name| root_prefix.join("envs").join(name)))
         .or_else(|| yaml_file_stem.map(|name| root_prefix.join("envs").join(name)))
-        .or_else(|| std::env::var_os("CONDA_PREFIX").map(std::path::PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("MAMBA_TARGET_PREFIX")
+                .or_else(|| std::env::var_os("CONDA_PREFIX"))
+                .map(std::path::PathBuf::from)
+        })
         .ok_or(CoreError::MissingTargetPrefix)
 }
 

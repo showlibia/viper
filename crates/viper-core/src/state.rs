@@ -348,7 +348,11 @@ impl EnvironmentState {
     }
 
     pub fn requested_specs_map(prefix: &Path) -> Result<HashMap<String, String>, CoreError> {
-        let history = fs::read_to_string(history_path(prefix)).unwrap_or_default();
+        let history = match fs::read_to_string(history_path(prefix)) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(CoreError::Io(err)),
+        };
         let mut requested = HashMap::new();
 
         for line in history.lines() {
@@ -358,7 +362,13 @@ impl EnvironmentState {
             let Some((action, raw_specs)) = comment.split_once(" specs: ") else {
                 continue;
             };
-            let specs = serde_json::from_str::<Vec<String>>(raw_specs).unwrap_or_default();
+            let specs = serde_json::from_str::<Vec<String>>(raw_specs).map_err(|err| {
+                CoreError::InvalidEnvironmentFile(format!(
+                    "invalid history specs entry for action '{}': {}",
+                    action.trim(),
+                    err
+                ))
+            })?;
             match action.trim() {
                 "create" | "install" | "update" => {
                     for spec in specs {
@@ -470,7 +480,11 @@ impl EnvironmentState {
         }
         block.push('\n');
 
-        let mut existing = fs::read_to_string(&history_path).unwrap_or_default();
+        let mut existing = match fs::read_to_string(&history_path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(CoreError::Io(err)),
+        };
         existing.push_str(&block);
         fs::write(history_path, existing)?;
         Ok(())

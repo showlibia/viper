@@ -639,6 +639,46 @@ fn list_revisions_reads_history() {
 }
 
 #[test]
+fn list_uses_mamba_target_prefix_when_prefix_omitted() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .env("MAMBA_TARGET_PREFIX", &prefix)
+        .args(["--no-rc", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["target_prefix"], prefix.display().to_string());
+}
+
+#[test]
 fn install_pip_only_env_file_keeps_existing_conda_packages() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
@@ -950,6 +990,31 @@ fn remove_print_config_only_renders_target_prefix_and_specs() {
         body["data"]["specs"],
         serde_json::json!(["xtensor-python", "xtl"])
     );
+}
+
+#[test]
+fn remove_print_config_only_uses_mamba_target_prefix() {
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("remove-from-mamba-target");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .env("MAMBA_TARGET_PREFIX", &prefix)
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "remove",
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["message"], "config rendered");
+    assert_eq!(body["data"]["target_prefix"], prefix.display().to_string());
 }
 
 #[test]
@@ -1598,6 +1663,66 @@ dependencies:
     assert_ne!(
         body["data"]["target_prefix"],
         active_prefix.display().to_string()
+    );
+}
+
+#[test]
+fn install_print_config_only_uses_mamba_target_prefix() {
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("from-mamba-target");
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    let output = install
+        .env("MAMBA_TARGET_PREFIX", &prefix)
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "install",
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["message"], "config rendered");
+    assert_eq!(body["data"]["target_prefix"], prefix.display().to_string());
+}
+
+#[test]
+fn install_print_config_only_prefers_mamba_target_prefix_over_conda_prefix() {
+    let tmp = tempdir().expect("create temp dir");
+    let mamba_prefix = tmp.path().join("from-mamba-target");
+    let conda_prefix = tmp.path().join("from-conda-prefix");
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    let output = install
+        .env("MAMBA_TARGET_PREFIX", &mamba_prefix)
+        .env("CONDA_PREFIX", &conda_prefix)
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "install",
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(
+        body["data"]["target_prefix"],
+        mamba_prefix.display().to_string()
+    );
+    assert_ne!(
+        body["data"]["target_prefix"],
+        conda_prefix.display().to_string()
     );
 }
 
@@ -3287,6 +3412,116 @@ fn remove_real_history_io_failure_rolls_back_state() {
     let names = installed_package_names(&prefix);
     assert!(names.iter().any(|name| name == "numpy"));
     assert!(names.iter().any(|name| name == "python"));
+}
+
+#[test]
+fn remove_fails_on_malformed_history_specs() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let history_path = prefix.join("conda-meta").join("history");
+    fs::write(
+        &history_path,
+        "==> 2026-03-23 00:00:00 <==\n# install specs: [invalid-json\n",
+    )
+    .expect("write malformed history");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("invalid history specs entry"))
+    );
+}
+
+#[test]
+fn list_revisions_fails_when_history_is_unreadable() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let history_path = prefix.join("conda-meta").join("history");
+    fs::remove_file(&history_path).expect("remove history file");
+    fs::create_dir_all(&history_path).expect("make unreadable history path");
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--revisions",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("Is a directory"))
+    );
 }
 
 #[test]
