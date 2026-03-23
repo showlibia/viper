@@ -1015,6 +1015,82 @@ fn remove_default_prune_keeps_explicitly_requested_dependency() {
 }
 
 #[test]
+fn remove_default_prune_removes_requested_pip_package() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache_with_options(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[PackageSeed::new("python", "3.11.9", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let spec_file = tmp.path().join("pip-only.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+dependencies:
+  - pip:
+      - rich==13.0.0
+"#,
+    )
+    .expect("write env file");
+    seed_repodata_cache_with_options(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[PackageSeed::new("python", "3.11.9", "0")],
+    );
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "rich",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(!names.iter().any(|name| name == "rich"));
+}
+
+#[test]
 fn explicit_noop_install_persists_keep_spec_for_default_remove() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");

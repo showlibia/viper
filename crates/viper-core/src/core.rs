@@ -353,9 +353,14 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             } else {
                 let removal_preview = preview.remove_specs(&specs, false, &HashSet::new())?;
                 let removal_names = removal_preview
-                    .into_iter()
-                    .map(|item| item.name)
+                    .iter()
+                    .map(|item| item.name.clone())
                     .collect::<HashSet<_>>();
+                let preview_non_conda_unlinks = removal_preview
+                    .iter()
+                    .filter(|item| item.source != "conda")
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let mut keep_requested = EnvironmentState::requested_specs_map(&target_prefix)?
                     .into_iter()
                     .collect::<HashMap<_, _>>();
@@ -378,7 +383,17 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
                     .map_err(CoreError::UnsatisfiedSpecs)?;
                 let solved_plan = TransactionPlan::from_solved(&state.packages, &solved.actions);
-                solved_plan.unlink
+                let mut unlink = solved_plan.unlink;
+                for planned in preview_non_conda_unlinks {
+                    if !unlink
+                        .iter()
+                        .any(|item| item.name == planned.name && item.source == planned.source)
+                    {
+                        unlink.push(planned);
+                    }
+                }
+                unlink.sort_by(|a, b| a.name.cmp(&b.name));
+                unlink
             };
             let remove_plan = TransactionPlan {
                 fetch: Vec::new(),
