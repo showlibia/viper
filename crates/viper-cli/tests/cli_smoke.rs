@@ -3036,6 +3036,191 @@ fn install_explicit_file_rejects_non_url_entries() {
 }
 
 #[test]
+fn install_merges_multiple_classic_spec_files() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[
+            ("python", "3.12.0", "0"),
+            ("numpy", "2.0.0", "0"),
+            ("pip", "24.0", "0"),
+        ],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let spec_a = tmp.path().join("a.txt");
+    let spec_b = tmp.path().join("b.txt");
+    fs::write(&spec_a, "numpy\n").expect("write classic spec a");
+    fs::write(&spec_b, "pip\n").expect("write classic spec b");
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            spec_a.to_str().expect("utf8"),
+            "-f",
+            spec_b.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(names.iter().any(|name| name == "numpy"));
+    assert!(names.iter().any(|name| name == "pip"));
+}
+
+#[test]
+fn install_multiple_explicit_files_use_first_explicit_file() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let subdir = current_platform_subdir();
+    let explicit_a = tmp.path().join("a.explicit");
+    let explicit_b = tmp.path().join("b.explicit");
+    fs::write(
+        &explicit_a,
+        format!(
+            "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2\n"
+        ),
+    )
+    .expect("write explicit a");
+    fs::write(
+        &explicit_b,
+        format!(
+            "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/numpy-2.0.0-0.tar.bz2\n"
+        ),
+    )
+    .expect("write explicit b");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            explicit_a.to_str().expect("utf8"),
+            "-f",
+            explicit_b.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(!names.iter().any(|name| name == "numpy"));
+}
+
+#[test]
+fn install_rejects_mixed_file_spec_types() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let spec_yaml = tmp.path().join("env.yaml");
+    let spec_classic = tmp.path().join("specs.txt");
+    fs::write(&spec_yaml, "dependencies:\n  - numpy\n").expect("write yaml");
+    fs::write(&spec_classic, "numpy\n").expect("write classic");
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    let output = install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            spec_yaml.to_str().expect("utf8"),
+            "-f",
+            spec_classic.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("same format group"))
+    );
+}
+
+#[test]
 fn remove_after_explicit_create_removes_target_package() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
