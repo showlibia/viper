@@ -372,13 +372,13 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         .filter(|item| item.source != "conda")
                         .cloned()
                         .collect::<Vec<_>>();
+                    let installed_conda = state.conda_packages();
                     let mut repodata = Vec::new();
-                    inject_installed_candidates(&mut repodata, &state.conda_packages());
+                    inject_installed_candidates(&mut repodata, &installed_conda);
                     let solve_options = SolveOptions {
                         channels: config.channels.clone(),
                         strict_channel_priority: config.channel_priority == "strict",
-                        installed_preferred: state
-                            .conda_packages()
+                        installed_preferred: installed_conda
                             .into_iter()
                             .map(|pkg| (pkg.name, (pkg.version, pkg.build_string)))
                             .collect(),
