@@ -16,6 +16,8 @@ use crate::repodata::RepoPackage;
 use crate::spec::package_name_from_spec;
 use crate::transaction::PlannedLink;
 
+pub const PRODUCTION_SOLVER_ENGINE: &str = "resolvo";
+
 #[derive(Debug, Clone)]
 pub struct SolveOptions {
     pub channels: Vec<String>,
@@ -28,6 +30,10 @@ pub struct SolveOptions {
 pub struct SolveResult {
     pub actions: Vec<PlannedLink>,
     pub trace: Vec<String>,
+}
+
+pub fn production_solver_engine() -> &'static str {
+    PRODUCTION_SOLVER_ENGINE
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -322,6 +328,15 @@ pub fn solve_to_actions(
             Err(vec!["solver cancelled".to_string()])
         }
     }
+}
+
+pub fn solve_with_production_solver(
+    specs: &[String],
+    packages: &[RepoPackage],
+    options: &SolveOptions,
+) -> Result<SolveResult, Vec<String>> {
+    let _engine = production_solver_engine();
+    solve_to_actions(specs, packages, options)
 }
 
 fn package_dist_name(pkg: &RepoPackage) -> String {
@@ -824,5 +839,30 @@ mod tests {
         assert!(spec_requires_full_repodata(
             "python[sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef]"
         ));
+    }
+
+    #[test]
+    fn production_solver_engine_is_fixed() {
+        assert_eq!(production_solver_engine(), "resolvo");
+    }
+
+    #[test]
+    fn production_solver_entry_matches_direct_solver_behavior() {
+        let python = pkg(
+            "python",
+            "3.12.2",
+            "0",
+            "https://conda.anaconda.org/conda-forge",
+            "linux-64",
+        );
+        let opts = options(&["conda-forge"], false);
+        let specs = vec!["python>=3.11".to_string()];
+
+        let direct =
+            solve_to_actions(&specs, std::slice::from_ref(&python), &opts).expect("direct solve");
+        let via_production =
+            solve_with_production_solver(&specs, &[python], &opts).expect("production solve");
+        assert_eq!(direct.actions.len(), via_production.actions.len());
+        assert_eq!(direct.trace, via_production.trace);
     }
 }

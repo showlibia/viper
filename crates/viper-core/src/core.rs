@@ -7,7 +7,7 @@ use serde_json::json;
 use crate::config::{ConfigInput, ConfigStore, build_config, name_to_target_prefix};
 use crate::error::CoreError;
 use crate::repodata::{RepoPackage, RepodataSource, fetch_packages};
-use crate::solver::{SolveOptions, solve_to_actions, spec_requires_full_repodata};
+use crate::solver::{SolveOptions, solve_with_production_solver, spec_requires_full_repodata};
 use crate::spec::{
     SpecFileKind, normalize_spec, package_name_from_spec, parse_explicit_url, parse_match_spec,
     parse_spec_file,
@@ -100,8 +100,12 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     installed_preferred: HashMap::new(),
                     user_requested: requested_names(&normalized.conda_specs),
                 };
-                let solved = solve_to_actions(&normalized.conda_specs, &repodata, &solve_options)
-                    .map_err(CoreError::UnsatisfiedSpecs)?;
+                let solved = solve_with_production_solver(
+                    &normalized.conda_specs,
+                    &repodata,
+                    &solve_options,
+                )
+                .map_err(CoreError::UnsatisfiedSpecs)?;
                 (solved.actions, Some(solved.trace))
             };
             let conda_plan = TransactionPlan::from_solved(&[], &conda_link_actions);
@@ -232,7 +236,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         .collect(),
                     user_requested: requested_names(&normalized.conda_specs),
                 };
-                let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
+                let solved = solve_with_production_solver(&solve_specs, &repodata, &solve_options)
                     .map_err(CoreError::UnsatisfiedSpecs)?;
                 (solved.actions, Some(solved.trace))
             };
@@ -387,7 +391,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         .collect(),
                     user_requested: requested_names(&solve_specs),
                 };
-                let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
+                let solved = solve_with_production_solver(&solve_specs, &repodata, &solve_options)
                     .map_err(CoreError::UnsatisfiedSpecs)?;
                 let solved_plan = TransactionPlan::from_solved(&state.packages, &solved.actions);
                 let mut unlink = solved_plan.unlink;
