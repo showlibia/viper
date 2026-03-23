@@ -1,9 +1,15 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 use rattler_conda_types::{
     MatchSpec, Version,
     version_spec::{LogicalOperator, RangeOperator, VersionSpec},
+};
+use resolvo::utils::{Pool, VersionSet};
+use resolvo::{
+    Candidates, Dependencies, DependencyProvider, Interner, KnownDependencies, NameId, Problem,
+    Requirement, SolvableId, Solver, SolverCache, StringId, VersionSetId, VersionSetUnionId,
 };
 
 use crate::repodata::RepoPackage;
@@ -24,18 +30,216 @@ pub struct SolveResult {
     pub trace: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-struct SpecConstraint {
-    raw: String,
-    parsed: MatchSpec,
-    required_by: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CondaVersionSet {
+    spec: String,
 }
 
-#[derive(Debug, Clone)]
-struct SearchState {
-    selected: BTreeMap<String, usize>,
-    constraints: BTreeMap<String, Vec<SpecConstraint>>,
-    trace: Vec<String>,
+impl Display for CondaVersionSet {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.spec)
+    }
+}
+
+impl VersionSet for CondaVersionSet {
+    type V = usize;
+}
+
+struct CondaProvider {
+    pool: Pool<CondaVersionSet>,
+    packages: Vec<RepoPackage>,
+    by_name: HashMap<String, Vec<usize>>,
+    options: SolveOptions,
+    channel_priority: HashMap<String, usize>,
+}
+
+impl CondaProvider {
+    fn new(packages: &[RepoPackage], options: SolveOptions) -> Self {
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, pkg) in packages.iter().enumerate() {
+            by_name.entry(pkg.name.clone()).or_default().push(idx);
+        }
+        Self {
+            pool: Pool::new(),
+            packages: packages.to_vec(),
+            by_name,
+            channel_priority: build_channel_priority_map(&options.channels),
+            options,
+        }
+    }
+
+    fn intern_requirement(&self, spec: &str) -> Result<Requirement, String> {
+        let parsed = parse_constraint_spec(spec)?;
+        let name = requested_name(spec, &parsed);
+        let name_id = self.pool.intern_package_name(name);
+        let version_set = self.pool.intern_version_set(
+            name_id,
+            CondaVersionSet {
+                spec: spec.to_string(),
+            },
+        );
+        Ok(version_set.into())
+    }
+}
+
+impl Interner for CondaProvider {
+    fn display_solvable(&self, solvable: SolvableId) -> impl Display + '_ {
+        let idx = self.pool.resolve_solvable(solvable).record;
+        let pkg = &self.packages[idx];
+        format!("{}={}={}", pkg.name, pkg.version, pkg.build)
+    }
+
+    fn display_name(&self, name: NameId) -> impl Display + '_ {
+        self.pool.resolve_package_name(name)
+    }
+
+    fn display_version_set(&self, version_set: VersionSetId) -> impl Display + '_ {
+        self.pool.resolve_version_set(version_set)
+    }
+
+    fn display_string(&self, string_id: StringId) -> impl Display + '_ {
+        self.pool.resolve_string(string_id)
+    }
+
+    fn version_set_name(&self, version_set: VersionSetId) -> NameId {
+        self.pool.resolve_version_set_package_name(version_set)
+    }
+
+    fn solvable_name(&self, solvable: SolvableId) -> NameId {
+        self.pool.resolve_solvable(solvable).name
+    }
+
+    fn version_sets_in_union(
+        &self,
+        version_set_union: VersionSetUnionId,
+    ) -> impl Iterator<Item = VersionSetId> {
+        self.pool.resolve_version_set_union(version_set_union)
+    }
+}
+
+impl DependencyProvider for CondaProvider {
+    async fn filter_candidates(
+        &self,
+        candidates: &[SolvableId],
+        version_set: VersionSetId,
+        inverse: bool,
+    ) -> Vec<SolvableId> {
+        let spec = self.pool.resolve_version_set(version_set);
+        let Ok(parsed) = parse_constraint_spec(&spec.spec) else {
+            return Vec::new();
+        };
+        candidates
+            .iter()
+            .copied()
+            .filter(|id| {
+                let idx = self.pool.resolve_solvable(*id).record;
+                let matched = candidate_matches_spec(&parsed, &self.packages[idx]);
+                matched != inverse
+            })
+            .collect()
+    }
+
+    async fn get_candidates(&self, name: NameId) -> Option<Candidates> {
+        let name_str = self.pool.resolve_package_name(name);
+        let indices = self.by_name.get(name_str)?;
+
+        let filtered = if self.options.strict_channel_priority {
+            let top_rank = indices
+                .iter()
+                .map(|idx| {
+                    channel_rank(&self.channel_priority, self.packages[*idx].channel.as_str())
+                })
+                .min()
+                .unwrap_or(usize::MAX);
+            indices
+                .iter()
+                .copied()
+                .filter(|idx| {
+                    channel_rank(&self.channel_priority, self.packages[*idx].channel.as_str())
+                        == top_rank
+                })
+                .collect::<Vec<_>>()
+        } else {
+            indices.clone()
+        };
+
+        let mut candidates = Vec::with_capacity(filtered.len());
+        let mut favored = None;
+        for idx in filtered {
+            let solvable = self.pool.intern_solvable(name, idx);
+            if let Some((installed_version, installed_build)) =
+                self.options.installed_preferred.get(name_str)
+            {
+                let pkg = &self.packages[idx];
+                if &pkg.version == installed_version && &pkg.build == installed_build {
+                    favored = Some(solvable);
+                }
+            }
+            candidates.push(solvable);
+        }
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        Some(Candidates {
+            hint_dependencies_available: candidates.clone(),
+            candidates,
+            favored,
+            ..Candidates::default()
+        })
+    }
+
+    async fn sort_candidates(&self, _solver: &SolverCache<Self>, solvables: &mut [SolvableId]) {
+        if solvables.is_empty() {
+            return;
+        }
+        let name_id = self.pool.resolve_solvable(solvables[0]).name;
+        let name = self.pool.resolve_package_name(name_id);
+        solvables.sort_by(|a, b| {
+            let a_idx = self.pool.resolve_solvable(*a).record;
+            let b_idx = self.pool.resolve_solvable(*b).record;
+            compare_candidate_indexes(
+                name,
+                b_idx,
+                a_idx,
+                &self.packages,
+                &self.options,
+                &self.channel_priority,
+            )
+        });
+    }
+
+    async fn get_dependencies(&self, solvable: SolvableId) -> Dependencies {
+        let idx = self.pool.resolve_solvable(solvable).record;
+        let pkg = &self.packages[idx];
+
+        let mut requirements = Vec::new();
+        for dep in &pkg.depends {
+            match self.intern_requirement(dep) {
+                Ok(req) => requirements.push(req),
+                Err(err) => return Dependencies::Unknown(self.pool.intern_string(err)),
+            }
+        }
+
+        let mut constrains = Vec::new();
+        for con in &pkg.constrains {
+            let Ok(parsed) = parse_constraint_spec(con) else {
+                continue;
+            };
+            let name = requested_name(con, &parsed);
+            let name_id = self.pool.intern_package_name(name);
+            let version_set = self
+                .pool
+                .intern_version_set(name_id, CondaVersionSet { spec: con.clone() });
+            constrains.push(version_set);
+        }
+
+        Dependencies::Known(KnownDependencies {
+            requirements,
+            constrains,
+        })
+    }
 }
 
 pub fn solve_to_actions(
@@ -43,281 +247,74 @@ pub fn solve_to_actions(
     packages: &[RepoPackage],
     options: &SolveOptions,
 ) -> Result<SolveResult, Vec<String>> {
-    let channel_priority = build_channel_priority_map(&options.channels);
-    let mut state = SearchState {
-        selected: BTreeMap::new(),
-        constraints: BTreeMap::new(),
-        trace: Vec::new(),
-    };
-
+    let provider = CondaProvider::new(packages, options.clone());
+    let mut requirements = Vec::new();
     for spec in specs {
-        let parsed = parse_constraint_spec(spec).map_err(|err| vec![err])?;
-        let name = requested_name(spec, &parsed);
-        push_constraint(
-            &mut state.constraints,
-            name,
-            SpecConstraint {
-                raw: spec.clone(),
-                parsed,
-                required_by: None,
-            },
-        );
+        requirements.push(provider.intern_requirement(spec).map_err(|err| vec![err])?);
     }
 
-    let solved = solve_recursive(packages, options, &channel_priority, state)?;
-    let actions = solved
-        .selected
-        .values()
-        .map(|idx| {
-            let best = &packages[*idx];
-            PlannedLink {
-                name: best.name.clone(),
-                version: best.version.clone(),
-                build: best.build.clone(),
-                build_number: best.build_number,
-                dist_name: package_dist_name(best),
-                channel: best.channel.clone(),
-                base_url: best.base_url.clone(),
-                url: best.url.clone(),
-                md5: best.md5.clone(),
-                sha256: best.sha256.clone(),
-                depends: best.depends.clone(),
-                platform: best.subdir.clone(),
-                source: "conda".to_string(),
-            }
-        })
-        .collect::<Vec<_>>();
+    let mut solver = Solver::new(provider);
+    let problem = Problem::new().requirements(requirements);
 
-    Ok(SolveResult {
-        actions,
-        trace: solved.trace,
-    })
-}
+    match solver.solve(problem) {
+        Ok(solved) => {
+            let actions = solved
+                .into_iter()
+                .map(|solvable| {
+                    let idx = solver.provider().pool.resolve_solvable(solvable).record;
+                    let best = &solver.provider().packages[idx];
+                    PlannedLink {
+                        name: best.name.clone(),
+                        version: best.version.clone(),
+                        build: best.build.clone(),
+                        build_number: best.build_number,
+                        dist_name: package_dist_name(best),
+                        channel: best.channel.clone(),
+                        base_url: best.base_url.clone(),
+                        url: best.url.clone(),
+                        md5: best.md5.clone(),
+                        sha256: best.sha256.clone(),
+                        depends: best.depends.clone(),
+                        platform: best.subdir.clone(),
+                        source: "conda".to_string(),
+                    }
+                })
+                .collect::<Vec<_>>();
 
-fn solve_recursive(
-    packages: &[RepoPackage],
-    options: &SolveOptions,
-    channel_priority: &HashMap<String, usize>,
-    state: SearchState,
-) -> Result<SearchState, Vec<String>> {
-    let Some(next_name) = state
-        .constraints
-        .keys()
-        .find(|name| !state.selected.contains_key(*name))
-        .cloned()
-    else {
-        return Ok(state);
-    };
-
-    let constraints = state
-        .constraints
-        .get(&next_name)
-        .cloned()
-        .unwrap_or_default();
-    let candidates = ranked_candidates(
-        &next_name,
-        &constraints,
-        packages,
-        options,
-        channel_priority,
-    );
-
-    if candidates.is_empty() {
-        return Err(explain_unsatisfied(&next_name, &constraints));
-    }
-
-    let mut branch_errors = Vec::new();
-    for idx in candidates {
-        let candidate = &packages[idx];
-        let mut next_state = state.clone();
-        next_state.selected.insert(next_name.clone(), idx);
-        next_state.trace.push(format!(
-            "selected {}={} build={} channel={} for constraints [{}]",
-            candidate.name,
-            candidate.version,
-            candidate.build,
-            candidate.channel,
-            constraints
+            let trace = actions
                 .iter()
-                .map(|constraint| constraint.raw.clone())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+                .map(|action| {
+                    format!(
+                        "selected {}={} build={} channel={}",
+                        action.name, action.version, action.build, action.channel
+                    )
+                })
+                .collect::<Vec<_>>();
 
-        let mut immediate_conflicts = Vec::new();
-        for dep in &candidate.depends {
-            let dep_name = package_name_from_spec(dep).unwrap_or_else(|_| dep.clone());
-            let required_by = format!("{}={}", candidate.name, candidate.version);
-            let dep_constraint = match parse_constraint_spec(dep) {
-                Ok(parsed) => SpecConstraint {
-                    raw: dep.clone(),
-                    parsed,
-                    required_by: Some(required_by.clone()),
-                },
-                Err(err) => {
-                    immediate_conflicts.push(format!(
-                        "conflict: {required_by} has invalid dependency spec '{dep}': {err}"
-                    ));
-                    continue;
-                }
-            };
-            push_constraint(
-                &mut next_state.constraints,
-                dep_name.clone(),
-                dep_constraint,
-            );
-
-            if let Some(selected_dep) = next_state.selected.get(&dep_name) {
-                let selected_pkg = &packages[*selected_dep];
-                let dep_constraints = next_state
-                    .constraints
-                    .get(&dep_name)
-                    .expect("constraint entry must exist");
-                if !matches_all_constraints(dep_constraints, selected_pkg) {
-                    immediate_conflicts.push(format!(
-                        "conflict: {}={} requires '{}' but selected {}={}",
-                        candidate.name,
-                        candidate.version,
-                        dep,
-                        selected_pkg.name,
-                        selected_pkg.version
-                    ));
+            Ok(SolveResult { actions, trace })
+        }
+        Err(resolvo::UnsolvableOrCancelled::Unsolvable(conflict)) => {
+            let mut errors = vec![format!(
+                "conflict: {}",
+                conflict.display_user_friendly(&solver)
+            )];
+            for spec in specs {
+                errors.push(format!("unsatisfied: requested spec '{spec}'"));
+            }
+            let mut dep_specs = HashSet::new();
+            for pkg in packages {
+                for dep in &pkg.depends {
+                    dep_specs.insert(dep.clone());
                 }
             }
+            for dep in dep_specs {
+                errors.push(format!("unsatisfied: dependency spec '{dep}'"));
+            }
+            Err(errors)
         }
-
-        if !immediate_conflicts.is_empty() {
-            branch_errors.extend(immediate_conflicts);
-            continue;
+        Err(resolvo::UnsolvableOrCancelled::Cancelled(_)) => {
+            Err(vec!["solver cancelled".to_string()])
         }
-
-        match solve_recursive(packages, options, channel_priority, next_state) {
-            Ok(solved) => return Ok(solved),
-            Err(errs) => branch_errors.extend(errs),
-        }
-    }
-
-    if branch_errors.is_empty() {
-        Err(explain_unsatisfied(&next_name, &constraints))
-    } else {
-        let mut seen = HashSet::new();
-        let deduped = branch_errors
-            .into_iter()
-            .filter(|line| seen.insert(line.clone()))
-            .collect::<Vec<_>>();
-        Err(deduped)
-    }
-}
-
-fn ranked_candidates(
-    name: &str,
-    constraints: &[SpecConstraint],
-    packages: &[RepoPackage],
-    options: &SolveOptions,
-    channel_priority: &HashMap<String, usize>,
-) -> Vec<usize> {
-    let mut candidates = packages
-        .iter()
-        .enumerate()
-        .filter(|(_, package)| package.name == name)
-        .filter(|(_, package)| matches_all_constraints(constraints, package))
-        .map(|(idx, _)| idx)
-        .collect::<Vec<_>>();
-
-    if candidates.is_empty() {
-        return candidates;
-    }
-
-    if options.strict_channel_priority {
-        let top_rank = candidates
-            .iter()
-            .map(|idx| channel_rank(channel_priority, packages[*idx].channel.as_str()))
-            .min()
-            .unwrap_or(usize::MAX);
-        candidates.retain(|idx| {
-            channel_rank(channel_priority, packages[*idx].channel.as_str()) == top_rank
-        });
-    }
-
-    candidates.sort_by(|a, b| {
-        compare_candidate_indexes(name, *b, *a, packages, options, channel_priority)
-    });
-    candidates
-}
-
-fn compare_candidate_indexes(
-    name: &str,
-    a_idx: usize,
-    b_idx: usize,
-    packages: &[RepoPackage],
-    options: &SolveOptions,
-    channel_priority: &HashMap<String, usize>,
-) -> std::cmp::Ordering {
-    let a = &packages[a_idx];
-    let b = &packages[b_idx];
-    let user_requested = options.user_requested.contains(name);
-
-    if !user_requested
-        && let Some((installed_version, installed_build)) = options.installed_preferred.get(name)
-    {
-        let a_installed = &a.version == installed_version && &a.build == installed_build;
-        let b_installed = &b.version == installed_version && &b.build == installed_build;
-        if a_installed != b_installed {
-            return a_installed.cmp(&b_installed);
-        }
-    }
-
-    compare_candidates(a, b).then_with(|| compare_channel_rank(a, b, channel_priority))
-}
-
-fn matches_all_constraints(constraints: &[SpecConstraint], candidate: &RepoPackage) -> bool {
-    constraints
-        .iter()
-        .all(|constraint| candidate_matches_spec(&constraint.parsed, candidate))
-}
-
-fn explain_unsatisfied(name: &str, constraints: &[SpecConstraint]) -> Vec<String> {
-    let mut errors = Vec::new();
-    for constraint in constraints {
-        let requester = constraint
-            .required_by
-            .as_deref()
-            .unwrap_or("user-requested spec");
-        errors.push(format!(
-            "unsatisfied: {requester} requires '{}' (package '{name}')",
-            constraint.raw
-        ));
-    }
-    if constraints.len() > 1 {
-        let summary = constraints
-            .iter()
-            .map(|constraint| {
-                let requester = constraint
-                    .required_by
-                    .as_deref()
-                    .unwrap_or("user-requested spec");
-                format!("{requester}: {}", constraint.raw)
-            })
-            .collect::<Vec<_>>()
-            .join(" && ");
-        errors.push(format!(
-            "conflict: no candidate for package '{name}' satisfies all constraints ({summary})"
-        ));
-    }
-    errors
-}
-
-fn push_constraint(
-    constraints: &mut BTreeMap<String, Vec<SpecConstraint>>,
-    name: String,
-    new_constraint: SpecConstraint,
-) {
-    let entry = constraints.entry(name).or_default();
-    let exists = entry.iter().any(|existing| {
-        existing.raw == new_constraint.raw && existing.required_by == new_constraint.required_by
-    });
-    if !exists {
-        entry.push(new_constraint);
     }
 }
 
@@ -457,6 +454,31 @@ fn compare_candidates(a: &RepoPackage, b: &RepoPackage) -> std::cmp::Ordering {
             .then_with(|| a.build_number.cmp(&b.build_number))
             .then_with(|| a.build.cmp(&b.build)),
     }
+}
+
+fn compare_candidate_indexes(
+    name: &str,
+    a_idx: usize,
+    b_idx: usize,
+    packages: &[RepoPackage],
+    options: &SolveOptions,
+    channel_priority: &HashMap<String, usize>,
+) -> std::cmp::Ordering {
+    let a = &packages[a_idx];
+    let b = &packages[b_idx];
+    let user_requested = options.user_requested.contains(name);
+
+    if !user_requested
+        && let Some((installed_version, installed_build)) = options.installed_preferred.get(name)
+    {
+        let a_installed = &a.version == installed_version && &a.build == installed_build;
+        let b_installed = &b.version == installed_version && &b.build == installed_build;
+        if a_installed != b_installed {
+            return a_installed.cmp(&b_installed);
+        }
+    }
+
+    compare_candidates(a, b).then_with(|| compare_channel_rank(a, b, channel_priority))
 }
 
 #[cfg(test)]

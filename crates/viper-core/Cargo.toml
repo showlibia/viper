@@ -16,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
+resolvo = "0.8.6"
 
 [dev-dependencies]
 tempfile = "3.13"
