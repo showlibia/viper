@@ -639,7 +639,7 @@ fn list_revisions_reads_history() {
 }
 
 #[test]
-fn list_uses_mamba_target_prefix_when_prefix_omitted() {
+fn list_uses_viper_target_prefix_when_prefix_omitted() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
     let prefix = tmp.path().join("env");
@@ -666,7 +666,7 @@ fn list_uses_mamba_target_prefix_when_prefix_omitted() {
 
     let mut list = Command::cargo_bin("viper").expect("binary exists");
     let output = list
-        .env("MAMBA_TARGET_PREFIX", &prefix)
+        .env("VIPER_TARGET_PREFIX", &prefix)
         .args(["--no-rc", "list", "--json"])
         .assert()
         .success()
@@ -993,13 +993,13 @@ fn remove_print_config_only_renders_target_prefix_and_specs() {
 }
 
 #[test]
-fn remove_print_config_only_uses_mamba_target_prefix() {
+fn remove_print_config_only_uses_viper_target_prefix() {
     let tmp = tempdir().expect("create temp dir");
-    let prefix = tmp.path().join("remove-from-mamba-target");
+    let prefix = tmp.path().join("remove-from-viper-target");
 
     let mut remove = Command::cargo_bin("viper").expect("binary exists");
     let output = remove
-        .env("MAMBA_TARGET_PREFIX", &prefix)
+        .env("VIPER_TARGET_PREFIX", &prefix)
         .args([
             "--no-rc",
             "--print-config-only",
@@ -1667,13 +1667,13 @@ dependencies:
 }
 
 #[test]
-fn install_print_config_only_uses_mamba_target_prefix() {
+fn install_print_config_only_uses_viper_target_prefix() {
     let tmp = tempdir().expect("create temp dir");
-    let prefix = tmp.path().join("from-mamba-target");
+    let prefix = tmp.path().join("from-viper-target");
 
     let mut install = Command::cargo_bin("viper").expect("binary exists");
     let output = install
-        .env("MAMBA_TARGET_PREFIX", &prefix)
+        .env("VIPER_TARGET_PREFIX", &prefix)
         .args([
             "--no-rc",
             "--print-config-only",
@@ -1693,14 +1693,14 @@ fn install_print_config_only_uses_mamba_target_prefix() {
 }
 
 #[test]
-fn install_print_config_only_prefers_mamba_target_prefix_over_conda_prefix() {
+fn install_print_config_only_prefers_viper_target_prefix_over_conda_prefix() {
     let tmp = tempdir().expect("create temp dir");
-    let mamba_prefix = tmp.path().join("from-mamba-target");
+    let viper_prefix = tmp.path().join("from-viper-target");
     let conda_prefix = tmp.path().join("from-conda-prefix");
 
     let mut install = Command::cargo_bin("viper").expect("binary exists");
     let output = install
-        .env("MAMBA_TARGET_PREFIX", &mamba_prefix)
+        .env("VIPER_TARGET_PREFIX", &viper_prefix)
         .env("CONDA_PREFIX", &conda_prefix)
         .args([
             "--no-rc",
@@ -1718,7 +1718,7 @@ fn install_print_config_only_prefers_mamba_target_prefix_over_conda_prefix() {
     let body: Value = serde_json::from_slice(&output).expect("valid json");
     assert_eq!(
         body["data"]["target_prefix"],
-        mamba_prefix.display().to_string()
+        viper_prefix.display().to_string()
     );
     assert_ne!(
         body["data"]["target_prefix"],
@@ -1727,10 +1727,10 @@ fn install_print_config_only_prefers_mamba_target_prefix_over_conda_prefix() {
 }
 
 #[test]
-fn install_prefers_mamba_target_prefix_over_conda_prefix_non_print_path() {
+fn install_prefers_viper_target_prefix_over_conda_prefix_non_print_path() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
-    let mamba_prefix = tmp.path().join("from-mamba-target");
+    let viper_prefix = tmp.path().join("from-viper-target");
     let conda_prefix = tmp.path().join("from-conda-prefix");
 
     seed_repodata_cache(
@@ -1747,7 +1747,7 @@ fn install_prefers_mamba_target_prefix_over_conda_prefix_non_print_path() {
             "create",
             "--offline",
             "-p",
-            mamba_prefix.to_str().expect("utf8"),
+            viper_prefix.to_str().expect("utf8"),
             "python",
             "--json",
         ])
@@ -1757,13 +1757,13 @@ fn install_prefers_mamba_target_prefix_over_conda_prefix_non_print_path() {
     let mut install = Command::cargo_bin("viper").expect("binary exists");
     install
         .env("HOME", tmp_home.path())
-        .env("MAMBA_TARGET_PREFIX", &mamba_prefix)
+        .env("VIPER_TARGET_PREFIX", &viper_prefix)
         .env("CONDA_PREFIX", &conda_prefix)
         .args(["--no-rc", "install", "--offline", "numpy", "--json"])
         .assert()
         .success();
 
-    let names = installed_package_names(&mamba_prefix);
+    let names = installed_package_names(&viper_prefix);
     assert!(names.iter().any(|name| name == "python"));
     assert!(names.iter().any(|name| name == "numpy"));
     assert!(!conda_prefix.exists());

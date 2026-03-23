@@ -19,6 +19,12 @@
 - AC-7 输出稳定：`list/info/config` 高频字段与 JSON 结构稳定，支持 snapshot 回归。
 - AC-8 回归体系：兼容矩阵每行都要有 upstream 证据 + enforcing test，CI 持续执行全量门禁。
 
+### Environment Variable Policy
+- 环境变量兼容目标：优先兼容 conda 与 viper 语义，不把 mamba 专有环境变量作为必需兼容项。
+- 目标前缀环境变量基线：`VIPER_TARGET_PREFIX` + `CONDA_PREFIX`。
+- 推荐优先级：`--prefix` > `--name` > env-file `name` > `VIPER_TARGET_PREFIX` > `CONDA_PREFIX`。
+- 若存在 mamba 专有环境变量兼容分支，默认视为迁移期行为，需要在计划中标注并逐步收敛。
+
 ## Scope Boundaries
 - Upper Bound:
   - 达成与 micromamba 核心工作流高度一致：`create/install/remove/list/info/config` 稳定、request normalization 完整、solver-backed remove、事务回滚、缓存/离线语义、稳定 CLI/JSON。

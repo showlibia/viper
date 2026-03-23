@@ -277,3 +277,6 @@
   - 是否已有 upstream reference
   - 是否已有 enforcing test
   - 是否存在“本地测试通过但上游行为不同”的假阳性
+
+
+--- Original Design Draft End ---

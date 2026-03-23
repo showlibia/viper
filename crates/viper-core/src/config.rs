@@ -199,7 +199,7 @@ fn resolve_target_prefix(
     if let Some(name) = env_name {
         return Some(root_prefix.join("envs").join(name));
     }
-    std::env::var_os("MAMBA_TARGET_PREFIX")
+    std::env::var_os("VIPER_TARGET_PREFIX")
         .or_else(|| std::env::var_os("CONDA_PREFIX"))
         .map(PathBuf::from)
 }

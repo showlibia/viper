@@ -815,7 +815,7 @@ fn resolve_create_target_prefix(
         .or_else(|| yaml_name.map(|name| root_prefix.join("envs").join(name)))
         .or_else(|| yaml_file_stem.map(|name| root_prefix.join("envs").join(name)))
         .or_else(|| {
-            std::env::var_os("MAMBA_TARGET_PREFIX")
+            std::env::var_os("VIPER_TARGET_PREFIX")
                 .or_else(|| std::env::var_os("CONDA_PREFIX"))
                 .map(std::path::PathBuf::from)
         })
