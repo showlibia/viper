@@ -84,7 +84,7 @@ This document tracks command-level behavior alignment using upstream `mamba/` so
 - `--export`
 - `--revisions`
 
-Behavior parity remains in progress for full transaction/rollback semantics.
+Transaction, rollback, and dry-run coverage is tracked by the command rows above and the repodata/parser matrix below; reserved shard/zstd index variants remain explicitly rejected rather than silently emulated.
 
 ## Repodata and Parser Matrix
 
