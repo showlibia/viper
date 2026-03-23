@@ -113,8 +113,9 @@ fn fetch_subdir(
 ) -> Result<RepodataFile, CoreError> {
     let url = format!("{channel}/{subdir}/{repodata_filename}");
     let paths = cache_paths(cache_root, &url);
-    let cached_json = read_cached_json(&paths.json);
-    let cached_meta = read_cached_meta(&paths.meta);
+    let cached_json = read_cached_json(&paths.json)?;
+    let cached_meta = read_cached_meta(&paths.meta)?;
+    validate_cache_coherence(&url, cached_json.as_ref(), cached_meta.as_ref())?;
 
     if offline {
         if let Some(raw) = cached_json {
@@ -282,13 +283,56 @@ fn write_meta(path: &Path, meta: &CacheMeta) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn read_cached_json(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok()
+fn read_cached_json(path: &Path) -> Result<Option<String>, CoreError> {
+    match fs::read_to_string(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(CoreError::Io(err)),
+    }
 }
 
-fn read_cached_meta(path: &Path) -> Option<CacheMeta> {
-    let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+fn read_cached_meta(path: &Path) -> Result<Option<CacheMeta>, CoreError> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(CoreError::Io(err)),
+    };
+    serde_json::from_str(&raw).map(Some).map_err(|err| {
+        CoreError::InvalidRepodata(format!(
+            "invalid repodata cache metadata '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
+fn validate_cache_coherence(
+    url: &str,
+    cached_json: Option<&String>,
+    cached_meta: Option<&CacheMeta>,
+) -> Result<(), CoreError> {
+    match (cached_json.is_some(), cached_meta) {
+        (true, None) => {
+            return Err(CoreError::InvalidRepodata(format!(
+                "cached repodata '{url}' is missing cache metadata"
+            )));
+        }
+        (false, Some(_)) => {
+            return Err(CoreError::InvalidRepodata(format!(
+                "cache metadata for '{url}' exists without cached repodata json"
+            )));
+        }
+        (false, None) => return Ok(()),
+        (true, Some(meta)) => {
+            if let Some(meta_url) = meta.url.as_deref()
+                && meta_url != url
+            {
+                return Err(CoreError::InvalidRepodata(format!(
+                    "cached repodata metadata url mismatch: expected '{url}', found '{meta_url}'"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cache_control_max_age(header: Option<&str>) -> Option<u64> {
@@ -606,7 +650,8 @@ mod tests {
             )
             .meta,
         )
-        .expect("cached meta")
+        .expect("read cached meta")
+        .expect("cached meta exists")
         .fetched_at_epoch_s;
 
         let packages = fetch_packages(
@@ -628,7 +673,8 @@ mod tests {
             )
             .meta,
         )
-        .expect("updated meta")
+        .expect("read updated meta")
+        .expect("updated meta exists")
         .fetched_at_epoch_s;
         assert!(after >= before);
     }
@@ -680,6 +726,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn offline_fails_when_cache_state_json_is_malformed() {
+        let tmp = tempdir().expect("temp dir");
+        let cache_root = tmp.path().join("cache");
+        let channel = "https://conda.anaconda.org/conda-forge";
+        seed_cache_for_both_subdirs(
+            &cache_root,
+            channel,
+            "current_repodata.json",
+            now_epoch_s(),
+            "max-age=300",
+            r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+        );
+        let linux_paths = cache_paths(
+            &cache_root,
+            &format!("{channel}/linux-64/current_repodata.json"),
+        );
+        fs::write(&linux_paths.meta, "{invalid-json").expect("corrupt state json");
+
+        let err = fetch_packages(
+            &[channel.to_string()],
+            "linux-64",
+            true,
+            &cache_root,
+            1,
+            "current_repodata.json",
+        )
+        .expect_err("malformed state must fail");
+        match err {
+            CoreError::InvalidRepodata(msg) => assert!(msg.contains("cache metadata")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn offline_fails_when_cached_json_exists_without_state_meta() {
+        let tmp = tempdir().expect("temp dir");
+        let cache_root = tmp.path().join("cache");
+        let channel = "https://conda.anaconda.org/conda-forge";
+        fs::create_dir_all(&cache_root).expect("create cache root");
+        for subdir in ["linux-64", "noarch"] {
+            let paths = cache_paths(
+                &cache_root,
+                &format!("{channel}/{subdir}/current_repodata.json"),
+            );
+            fs::write(
+                &paths.json,
+                r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+            )
+            .expect("write repodata json");
+        }
+
+        let err = fetch_packages(
+            &[channel.to_string()],
+            "linux-64",
+            true,
+            &cache_root,
+            1,
+            "current_repodata.json",
+        )
+        .expect_err("missing state metadata must fail");
+        match err {
+            CoreError::InvalidRepodata(msg) => assert!(msg.contains("missing cache metadata")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
     fn seed_cache_for_both_subdirs(
         cache_root: &Path,
         channel: &str,
@@ -720,7 +833,9 @@ mod tests {
                 cache_root,
                 &format!("{channel}/{subdir}/{repodata_filename}"),
             );
-            let mut meta = read_cached_meta(&paths.meta).expect("existing meta");
+            let mut meta = read_cached_meta(&paths.meta)
+                .expect("read existing meta")
+                .expect("existing meta");
             meta.etag = Some(etag.to_string());
             meta.last_modified = Some("Mon, 01 Jan 2024 00:00:00 GMT".to_string());
             write_meta(&paths.meta, &meta).expect("write updated state");

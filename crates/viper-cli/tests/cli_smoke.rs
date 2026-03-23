@@ -2124,6 +2124,161 @@ dependencies:
 }
 
 #[test]
+fn install_print_config_only_name_base_uses_root_prefix() {
+    let tmp_home = tempdir().expect("create temp home");
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    let output = install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "install",
+            "-n",
+            "base",
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let expected_prefix = tmp_home.path().join(".viper");
+    assert_eq!(
+        body["data"]["target_prefix"],
+        expected_prefix.display().to_string()
+    );
+}
+
+#[test]
+fn install_print_config_only_yaml_name_base_uses_root_prefix() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+name: base
+dependencies:
+  - python
+"#,
+    )
+    .expect("write env file");
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    let output = install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "install",
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let expected_prefix = tmp_home.path().join(".viper");
+    assert_eq!(
+        body["data"]["target_prefix"],
+        expected_prefix.display().to_string()
+    );
+}
+
+#[test]
+fn create_print_config_only_yaml_name_base_uses_root_prefix() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let spec_file = tmp.path().join("environment.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+name: base
+dependencies:
+  - python
+"#,
+    )
+    .expect("write env file");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "create",
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let expected_prefix = tmp_home.path().join(".viper");
+    assert_eq!(
+        body["data"]["target_prefix"],
+        expected_prefix.display().to_string()
+    );
+}
+
+#[test]
+fn install_name_base_non_print_path_uses_root_prefix() {
+    let tmp_home = tempdir().expect("create temp home");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("pip", "24.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-n",
+            "base",
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-n",
+            "base",
+            "pip",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let expected_prefix = tmp_home.path().join(".viper");
+    let names = installed_package_names(&expected_prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(names.iter().any(|name| name == "pip"));
+}
+
+#[test]
 fn create_accumulates_yaml_and_rc_channels_in_order() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");

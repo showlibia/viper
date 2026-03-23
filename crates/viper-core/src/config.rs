@@ -197,11 +197,19 @@ fn resolve_target_prefix(
         return Some(prefix);
     }
     if let Some(name) = env_name {
-        return Some(root_prefix.join("envs").join(name));
+        return Some(name_to_target_prefix(root_prefix, &name));
     }
     std::env::var_os("VIPER_TARGET_PREFIX")
         .or_else(|| std::env::var_os("CONDA_PREFIX"))
         .map(PathBuf::from)
+}
+
+pub(crate) fn name_to_target_prefix(root_prefix: &Path, name: &str) -> PathBuf {
+    if name == "base" {
+        root_prefix.to_path_buf()
+    } else {
+        root_prefix.join("envs").join(name)
+    }
 }
 
 #[cfg(test)]
@@ -234,5 +242,32 @@ mod tests {
         .expect("config must build");
 
         assert_eq!(cfg.target_prefix, Some(PathBuf::from("/tmp/root/envs/dev")));
+    }
+
+    #[test]
+    fn resolve_base_name_to_root_prefix() {
+        let globals = CliGlobalOptions {
+            root_prefix: Some(PathBuf::from("/tmp/root")),
+            prefix: None,
+            name: Some("base".to_string()),
+            channels: vec![],
+            json: false,
+            yes: false,
+            dry_run: false,
+            no_rc: true,
+            offline: false,
+            repodata_ttl: None,
+            verbose: 0,
+            print_config_only: false,
+        };
+        let cfg = build_config(
+            ConfigInput { globals },
+            &ConfigStore {
+                path: PathBuf::from("/tmp/does-not-exist"),
+            },
+        )
+        .expect("config must build");
+
+        assert_eq!(cfg.target_prefix, Some(PathBuf::from("/tmp/root")));
     }
 }

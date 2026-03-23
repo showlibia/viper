@@ -4,12 +4,13 @@ use std::fs;
 use regex::Regex;
 use serde_json::json;
 
-use crate::config::{ConfigInput, ConfigStore, build_config};
+use crate::config::{ConfigInput, ConfigStore, build_config, name_to_target_prefix};
 use crate::error::CoreError;
 use crate::repodata::{RepoPackage, fetch_packages};
 use crate::solver::{SolveOptions, solve_to_actions, spec_requires_full_repodata};
 use crate::spec::{
-    SpecFileKind, normalize_spec, parse_explicit_url, parse_match_spec, parse_spec_file,
+    SpecFileKind, normalize_spec, package_name_from_spec, parse_explicit_url, parse_match_spec,
+    parse_spec_file,
 };
 use crate::state::{EnvironmentState, is_managed_prefix};
 use crate::transaction::{PlannedLink, TransactionExecutor, TransactionPlan};
@@ -364,44 +365,42 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 for name in removal_names {
                     keep_requested.remove(&name);
                 }
-                let solve_specs = dedup_specs(keep_requested.into_values().collect::<Vec<_>>());
-                if solve_specs.is_empty() {
-                    let mut prune_preview = state.clone();
-                    prune_preview.remove_specs(&specs, true, &HashSet::new())?
+                let solve_specs = if keep_requested.is_empty() {
+                    fallback_keep_specs_without_requested_map(&state, &removal_preview)
                 } else {
-                    let preview_non_conda_unlinks = removal_preview
+                    dedup_specs(keep_requested.into_values().collect::<Vec<_>>())
+                };
+                let preview_non_conda_unlinks = removal_preview
+                    .iter()
+                    .filter(|item| item.source != "conda")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let installed_conda = state.conda_packages();
+                let mut repodata = Vec::new();
+                inject_installed_candidates(&mut repodata, &installed_conda);
+                let solve_options = SolveOptions {
+                    channels: config.channels.clone(),
+                    strict_channel_priority: config.channel_priority == "strict",
+                    installed_preferred: installed_conda
+                        .into_iter()
+                        .map(|pkg| (pkg.name, (pkg.version, pkg.build_string)))
+                        .collect(),
+                    user_requested: requested_names(&solve_specs),
+                };
+                let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
+                    .map_err(CoreError::UnsatisfiedSpecs)?;
+                let solved_plan = TransactionPlan::from_solved(&state.packages, &solved.actions);
+                let mut unlink = solved_plan.unlink;
+                for planned in preview_non_conda_unlinks {
+                    if !unlink
                         .iter()
-                        .filter(|item| item.source != "conda")
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let installed_conda = state.conda_packages();
-                    let mut repodata = Vec::new();
-                    inject_installed_candidates(&mut repodata, &installed_conda);
-                    let solve_options = SolveOptions {
-                        channels: config.channels.clone(),
-                        strict_channel_priority: config.channel_priority == "strict",
-                        installed_preferred: installed_conda
-                            .into_iter()
-                            .map(|pkg| (pkg.name, (pkg.version, pkg.build_string)))
-                            .collect(),
-                        user_requested: requested_names(&solve_specs),
-                    };
-                    let solved = solve_to_actions(&solve_specs, &repodata, &solve_options)
-                        .map_err(CoreError::UnsatisfiedSpecs)?;
-                    let solved_plan =
-                        TransactionPlan::from_solved(&state.packages, &solved.actions);
-                    let mut unlink = solved_plan.unlink;
-                    for planned in preview_non_conda_unlinks {
-                        if !unlink
-                            .iter()
-                            .any(|item| item.name == planned.name && item.source == planned.source)
-                        {
-                            unlink.push(planned);
-                        }
+                        .any(|item| item.name == planned.name && item.source == planned.source)
+                    {
+                        unlink.push(planned);
                     }
-                    unlink.sort_by(|a, b| a.name.cmp(&b.name));
-                    unlink
                 }
+                unlink.sort_by(|a, b| a.name.cmp(&b.name));
+                unlink
             };
             let remove_plan = TransactionPlan {
                 fetch: Vec::new(),
@@ -810,10 +809,10 @@ fn resolve_create_target_prefix(
             globals
                 .name
                 .as_ref()
-                .map(|name| root_prefix.join("envs").join(name))
+                .map(|name| name_to_target_prefix(root_prefix, name))
         })
-        .or_else(|| yaml_name.map(|name| root_prefix.join("envs").join(name)))
-        .or_else(|| yaml_file_stem.map(|name| root_prefix.join("envs").join(name)))
+        .or_else(|| yaml_name.map(|name| name_to_target_prefix(root_prefix, name)))
+        .or_else(|| yaml_file_stem.map(|name| name_to_target_prefix(root_prefix, name)))
         .or_else(|| {
             std::env::var_os("VIPER_TARGET_PREFIX")
                 .or_else(|| std::env::var_os("CONDA_PREFIX"))
@@ -835,9 +834,9 @@ fn resolve_install_target_prefix(
             globals
                 .name
                 .as_ref()
-                .map(|name| root_prefix.join("envs").join(name))
+                .map(|name| name_to_target_prefix(root_prefix, name))
         })
-        .or_else(|| yaml_name.map(|name| root_prefix.join("envs").join(name)))
+        .or_else(|| yaml_name.map(|name| name_to_target_prefix(root_prefix, name)))
         .or(config_target_prefix)
         .ok_or(CoreError::MissingTargetPrefix)
 }
@@ -1104,4 +1103,44 @@ fn package_record_to_repo_package(record: &PackageRecord) -> RepoPackage {
             record.url.clone()
         },
     }
+}
+
+fn fallback_keep_specs_without_requested_map(
+    state: &EnvironmentState,
+    removal_preview: &[crate::transaction::PlannedUnlink],
+) -> Vec<String> {
+    let removed_names = removal_preview
+        .iter()
+        .filter(|item| item.source == "conda")
+        .map(|item| item.name.clone())
+        .collect::<HashSet<_>>();
+
+    let mut removal_closure = removed_names.clone();
+    let mut queue = removed_names.into_iter().collect::<Vec<_>>();
+    while let Some(name) = queue.pop() {
+        let Some(pkg) = state
+            .packages
+            .iter()
+            .find(|pkg| pkg.source == "conda" && pkg.name == name)
+        else {
+            continue;
+        };
+        for dep in pkg
+            .depends
+            .iter()
+            .filter_map(|dep| package_name_from_spec(dep).ok())
+        {
+            if removal_closure.insert(dep.clone()) {
+                queue.push(dep);
+            }
+        }
+    }
+
+    let keep_specs = state
+        .packages
+        .iter()
+        .filter(|pkg| pkg.source == "conda" && !removal_closure.contains(&pkg.name))
+        .map(|pkg| format!("{}=={}", pkg.name, pkg.version))
+        .collect::<Vec<_>>();
+    dedup_specs(keep_specs)
 }
