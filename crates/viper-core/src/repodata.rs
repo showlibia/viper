@@ -793,6 +793,113 @@ mod tests {
         }
     }
 
+    #[test]
+    fn offline_fails_when_state_meta_exists_without_cached_json() {
+        let tmp = tempdir().expect("temp dir");
+        let cache_root = tmp.path().join("cache");
+        let channel = "https://conda.anaconda.org/conda-forge";
+        seed_cache_for_both_subdirs(
+            &cache_root,
+            channel,
+            "current_repodata.json",
+            now_epoch_s(),
+            "max-age=300",
+            r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+        );
+        let linux_paths = cache_paths(
+            &cache_root,
+            &format!("{channel}/linux-64/current_repodata.json"),
+        );
+        fs::remove_file(&linux_paths.json).expect("remove cached json");
+
+        let err = fetch_packages(
+            &[channel.to_string()],
+            "linux-64",
+            true,
+            &cache_root,
+            1,
+            "current_repodata.json",
+        )
+        .expect_err("metadata without json must fail");
+        match err {
+            CoreError::InvalidRepodata(msg) => assert!(msg.contains("without cached repodata")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn offline_fails_when_cache_metadata_url_mismatches_request() {
+        let tmp = tempdir().expect("temp dir");
+        let cache_root = tmp.path().join("cache");
+        let channel = "https://conda.anaconda.org/conda-forge";
+        seed_cache_for_both_subdirs(
+            &cache_root,
+            channel,
+            "current_repodata.json",
+            now_epoch_s(),
+            "max-age=300",
+            r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+        );
+        let linux_paths = cache_paths(
+            &cache_root,
+            &format!("{channel}/linux-64/current_repodata.json"),
+        );
+        let mut meta = read_cached_meta(&linux_paths.meta)
+            .expect("read meta")
+            .expect("meta exists");
+        meta.url =
+            Some("https://conda.anaconda.org/conda-forge/linux-64/repodata.json".to_string());
+        write_meta(&linux_paths.meta, &meta).expect("write mismatched meta");
+
+        let err = fetch_packages(
+            &[channel.to_string()],
+            "linux-64",
+            true,
+            &cache_root,
+            1,
+            "current_repodata.json",
+        )
+        .expect_err("url mismatch must fail");
+        match err {
+            CoreError::InvalidRepodata(msg) => assert!(msg.contains("url mismatch")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn offline_fails_when_cached_repodata_json_is_malformed() {
+        let tmp = tempdir().expect("temp dir");
+        let cache_root = tmp.path().join("cache");
+        let channel = "https://conda.anaconda.org/conda-forge";
+        seed_cache_for_both_subdirs(
+            &cache_root,
+            channel,
+            "current_repodata.json",
+            now_epoch_s(),
+            "max-age=300",
+            r#"{"packages":{"python-3.12.0-0.tar.bz2":{"name":"python","version":"3.12.0","build":"0"}}}"#,
+        );
+        let linux_paths = cache_paths(
+            &cache_root,
+            &format!("{channel}/linux-64/current_repodata.json"),
+        );
+        fs::write(&linux_paths.json, "{not-json").expect("corrupt cached repodata json");
+
+        let err = fetch_packages(
+            &[channel.to_string()],
+            "linux-64",
+            true,
+            &cache_root,
+            1,
+            "current_repodata.json",
+        )
+        .expect_err("malformed cached repodata must fail");
+        match err {
+            CoreError::InvalidRepodata(msg) => assert!(!msg.is_empty()),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
     fn seed_cache_for_both_subdirs(
         cache_root: &Path,
         channel: &str,

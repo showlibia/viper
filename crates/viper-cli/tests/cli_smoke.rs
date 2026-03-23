@@ -1255,6 +1255,182 @@ fn remove_with_unparseable_history_keeps_unrelated_conda_packages() {
 }
 
 #[test]
+fn remove_with_missing_history_keeps_unrelated_conda_packages() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let history_path = prefix.join("conda-meta").join("history");
+    fs::remove_file(&history_path).expect("remove history");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(!names.iter().any(|name| name == "numpy"));
+}
+
+#[test]
+fn remove_with_missing_history_keeps_shared_dependency_needed_by_survivor() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache_with_options(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[
+            PackageSeed::new("app-a", "1.0.0", "0").depends(&["shared-lib >=1.0"]),
+            PackageSeed::new("app-b", "1.0.0", "0").depends(&["shared-lib >=1.0"]),
+            PackageSeed::new("shared-lib", "1.0.0", "0"),
+        ],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "app-a",
+            "app-b",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let history_path = prefix.join("conda-meta").join("history");
+    fs::remove_file(&history_path).expect("remove history");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "app-a",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(!names.iter().any(|name| name == "app-a"));
+    assert!(names.iter().any(|name| name == "app-b"));
+    assert!(names.iter().any(|name| name == "shared-lib"));
+}
+
+#[test]
+fn remove_with_missing_history_preserves_conda_when_removing_pip_only_package() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("pip", "24.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "pip",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let spec_file = tmp.path().join("pip-only.yaml");
+    fs::write(
+        &spec_file,
+        r#"
+dependencies:
+  - pip:
+      - rich==13.0.0
+"#,
+    )
+    .expect("write env file");
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            spec_file.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let history_path = prefix.join("conda-meta").join("history");
+    fs::remove_file(&history_path).expect("remove history");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "rich",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(names.iter().any(|name| name == "pip"));
+    assert!(!names.iter().any(|name| name == "rich"));
+}
+
+#[test]
 fn explicit_noop_install_persists_keep_spec_for_default_remove() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
