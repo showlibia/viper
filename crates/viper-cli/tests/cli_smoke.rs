@@ -4794,6 +4794,125 @@ fn offline_with_cache_works() {
 }
 
 #[test]
+fn offline_relaxed_spec_uses_current_repodata_without_full_cache() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let channel = "https://conda.anaconda.org/conda-forge";
+    seed_named_repodata_cache(
+        tmp_home.path(),
+        channel,
+        "current_repodata.json",
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "--dry-run",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python>=3.11",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let links = body["data"]["actions"]["link"]
+        .as_array()
+        .expect("link actions");
+    assert!(links.iter().any(|p| p["name"] == "python"));
+}
+
+#[test]
+fn offline_restrictive_spec_requires_full_repodata_cache() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let channel = "https://conda.anaconda.org/conda-forge";
+    seed_named_repodata_cache(
+        tmp_home.path(),
+        channel,
+        "current_repodata.json",
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "--dry-run",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python<3.10",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(contains("offline mode requires a cached repodata index"));
+}
+
+#[test]
+fn offline_restrictive_spec_uses_full_repodata_when_available() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let channel = "https://conda.anaconda.org/conda-forge";
+    seed_named_repodata_cache(
+        tmp_home.path(),
+        channel,
+        "current_repodata.json",
+        &[("python", "3.12.0", "0")],
+    );
+    seed_named_repodata_cache(
+        tmp_home.path(),
+        channel,
+        "repodata.json",
+        &[("python", "3.9.18", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "--dry-run",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python<3.10",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let links = body["data"]["actions"]["link"]
+        .as_array()
+        .expect("link actions");
+    let python = links
+        .iter()
+        .find(|pkg| pkg["name"] == "python")
+        .expect("python action");
+    assert_eq!(python["version"], "3.9.18");
+}
+
+#[test]
 fn create_fails_without_repodata_and_does_not_write_state() {
     let tmp = tempdir().expect("create temp dir");
     let prefix = tmp.path().join("env");
@@ -5063,6 +5182,57 @@ fn seed_repodata_cache_with_options(home: &Path, channels: &[&str], packages: &[
                 .expect("write repodata state");
             }
         }
+    }
+}
+
+fn seed_named_repodata_cache(
+    home: &Path,
+    channel: &str,
+    repodata_name: &str,
+    packages: &[(&str, &str, &str)],
+) {
+    let with_defaults = packages
+        .iter()
+        .map(|(name, version, build)| PackageSeed::new(name, version, build))
+        .collect::<Vec<_>>();
+    let cache_root = home.join(".viper").join("pkgs").join("cache");
+    fs::create_dir_all(&cache_root).expect("create cache root");
+
+    let packages_json = with_defaults
+        .iter()
+        .map(|pkg| {
+            let filename = format!("{}-{}-{}.tar.bz2", pkg.name, pkg.version, pkg.build);
+            (
+                filename,
+                serde_json::json!({
+                    "name": &pkg.name,
+                    "version": &pkg.version,
+                    "build": &pkg.build,
+                    "build_number": pkg.build_number,
+                    "depends": &pkg.depends,
+                    "md5": &pkg.md5,
+                    "sha256": &pkg.sha256,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+    let repodata_body = serde_json::json!({ "packages": packages_json });
+
+    for subdir in [current_platform_subdir(), "noarch".to_string()] {
+        let key = cache_name_from_repodata_url(&format!("{channel}/{subdir}/{repodata_name}"));
+        fs::write(
+            cache_root.join(format!("{key}.json")),
+            serde_json::to_string(&repodata_body).expect("serialize repodata"),
+        )
+        .expect("write repodata cache");
+        fs::write(
+            cache_root.join(format!("{key}.state.json")),
+            format!(
+                "{{\"fetched_at_epoch_s\":{},\"cache_control\":\"max-age=3600\",\"url\":\"{channel}/{subdir}/{repodata_name}\"}}",
+                4_102_444_800u64
+            ),
+        )
+        .expect("write repodata state");
     }
 }
 
