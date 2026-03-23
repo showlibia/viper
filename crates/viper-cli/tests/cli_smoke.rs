@@ -234,6 +234,57 @@ fn remove_invalid_spec_fails() {
 }
 
 #[test]
+fn remove_all_keeps_prefix_but_removes_all_packages() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("pip", "24.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "pip",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--all",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], true);
+    assert!(
+        prefix.exists(),
+        "remove --all should not delete the environment prefix"
+    );
+    assert!(installed_package_names(&prefix).is_empty());
+}
+
+#[test]
 fn config_set_get_and_info() {
     let tmp_home = tempdir().expect("create temp home");
     let mut config_set = Command::cargo_bin("viper").expect("binary exists");

@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 
 use regex::Regex;
 use serde_json::json;
@@ -309,7 +308,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 .target_prefix
                 .clone()
                 .ok_or(CoreError::MissingTargetPrefix)?;
-            let specs = normalize_and_validate_match_specs(specs)?;
+            let mut specs = normalize_and_validate_match_specs(specs)?;
             if globals.print_config_only {
                 return Ok(OperationResult::ok(
                     "config rendered",
@@ -335,23 +334,18 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 ));
             }
 
-            if all {
-                if !config.dry_run {
-                    fs::remove_dir_all(&target_prefix)?;
-                }
-                return Ok(OperationResult::ok(
-                    "environment removed",
-                    json!({
-                        "target_prefix": target_prefix,
-                        "removed_all": true,
-                        "dry_run": config.dry_run,
-                    }),
-                ));
-            }
-
             let state = EnvironmentState::load(&target_prefix)?;
+            if all {
+                specs = state
+                    .packages
+                    .iter()
+                    .map(|pkg| pkg.name.clone())
+                    .collect::<Vec<_>>();
+                specs.sort();
+                specs.dedup();
+            }
             let mut preview = state.clone();
-            let removed = if force {
+            let removed = if all || force {
                 preview.force_remove_specs(&specs)?
             } else if no_prune_deps {
                 let keep_requested = EnvironmentState::requested_specs_map(&target_prefix)?
@@ -432,6 +426,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "target_prefix": target_prefix,
                     "removed": removed.len(),
                     "removed_names": removed_names,
+                    "removed_all": all,
                     "specs": specs,
                     "actions": {
                         "unlink": removed,
