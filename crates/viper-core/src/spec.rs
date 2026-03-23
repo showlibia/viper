@@ -389,6 +389,11 @@ fn parse_yaml_lockfile(path: &Path) -> Result<Option<EnvSpecFile>, CoreError> {
         else {
             continue;
         };
+        if manager == "conda" {
+            return Err(CoreError::InvalidEnvironmentFile(format!(
+                "lockfile conda entry for '{name}' is missing required 'url'"
+            )));
+        }
         let version = entry
             .get(serde_yaml::Value::String("version".to_string()))
             .and_then(|value| value.as_str())
@@ -778,6 +783,26 @@ package:
         assert_eq!(parsed.kind, SpecFileKind::Lock);
         assert_eq!(parsed.env.conda_specs.len(), 1);
         assert_eq!(parsed.env.pip_specs, vec!["rich==13.7.1".to_string()]);
+    }
+
+    #[test]
+    fn parse_lockfile_rejects_conda_entry_without_url() {
+        let tmp = tempdir().expect("create temp dir");
+        let file = tmp.path().join("conda-lock.yml");
+        fs::write(
+            &file,
+            r#"
+package:
+  - manager: conda
+    name: python
+    version: 3.12.0
+"#,
+        )
+        .expect("write lockfile");
+
+        let err = parse_spec_file(&file).expect_err("missing url must fail");
+        assert!(matches!(err, CoreError::InvalidEnvironmentFile(_)));
+        assert!(err.to_string().contains("missing required 'url'"));
     }
 
     #[test]

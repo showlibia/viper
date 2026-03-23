@@ -1091,6 +1091,58 @@ dependencies:
 }
 
 #[test]
+fn remove_with_unparseable_history_keeps_unrelated_conda_packages() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let history_path = prefix.join("conda-meta").join("history");
+    fs::write(
+        &history_path,
+        "==> 2026-03-23 00:00:00 <==\n# history truncated for test\n",
+    )
+    .expect("truncate history");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(!names.iter().any(|name| name == "numpy"));
+}
+
+#[test]
 fn explicit_noop_install_persists_keep_spec_for_default_remove() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
