@@ -602,13 +602,9 @@ fn normalize_request_inputs(
         }
         if parsed.kind == SpecFileKind::Lock {
             explicit_mode = true;
-            if explicit_specs.is_empty() {
-                explicit_specs = parsed.env.conda_specs;
-            } else {
-                explicit_specs.extend(parsed.env.conda_specs);
-            }
+            explicit_specs = parsed.env.conda_specs;
             conda_specs.clear();
-            pip_specs.extend(parsed.env.pip_specs);
+            pip_specs = parsed.env.pip_specs;
             warnings.push(format!(
                 "lockfile '{}' switches request into locked explicit mode",
                 path.display()
