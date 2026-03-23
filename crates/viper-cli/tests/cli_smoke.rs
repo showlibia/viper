@@ -4347,6 +4347,8 @@ fn create_dry_run_returns_transaction_actions() {
     assert!(body["data"]["actions"]["fetch"].is_array());
     assert!(body["data"]["actions"]["extract"].is_array());
     assert!(body["data"]["actions"]["link"].is_array());
+    assert!(body["data"]["actions"]["fetch"][0]["url"].is_string());
+    assert!(body["data"]["actions"]["extract"][0]["fetched_dist"].is_string());
 }
 
 #[test]
@@ -4524,6 +4526,9 @@ fn install_dry_run_returns_phase_separated_actions() {
     assert!(body["data"]["actions"]["fetch"].is_array());
     assert!(body["data"]["actions"]["extract"].is_array());
     assert!(body["data"]["actions"]["link"].is_array());
+    assert!(body["data"]["actions"]["fetch"][0]["url"].is_string());
+    assert!(body["data"]["actions"]["extract"][0]["fetched_dist"].is_string());
+    assert!(body["data"]["actions"]["link"][0]["build_number"].is_number());
 }
 
 #[test]
@@ -4650,6 +4655,51 @@ fn install_failure_after_extract_rolls_back_state_and_history() {
     assert_eq!(before_history, after_history);
     assert_eq!(before_names, after_names);
     assert!(!after_names.iter().any(|name| name == "numpy"));
+    assert!(!prefix.join("pkgs").join(".viper-transaction").exists());
+}
+
+#[test]
+fn install_success_cleans_transaction_stage_artifacts() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut install = Command::cargo_bin("viper").expect("binary exists");
+    install
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    assert!(!prefix.join("pkgs").join(".viper-transaction").exists());
 }
 
 #[test]

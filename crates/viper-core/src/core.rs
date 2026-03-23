@@ -15,7 +15,9 @@ use crate::spec::{
     parse_spec_file,
 };
 use crate::state::{EnvironmentState, is_managed_prefix};
-use crate::transaction::{PlannedLink, TransactionExecutor, TransactionPlan};
+use crate::transaction::{
+    PlannedExtract, PlannedFetch, PlannedLink, TransactionExecutor, TransactionPlan,
+};
 use crate::types::{
     CliConfigCommand, CliOperation, ListOptions, OperationRequest, OperationResult, PackageRecord,
 };
@@ -764,9 +766,31 @@ fn transaction_plan_for_explicit_install(
         }
     }
 
+    let fetch = link
+        .iter()
+        .filter(|planned| planned.source == "conda")
+        .map(|planned| PlannedFetch {
+            dist_name: if planned.dist_name.is_empty() {
+                format!("{}-{}-{}", planned.name, planned.version, planned.build)
+            } else {
+                planned.dist_name.clone()
+            },
+            url: planned.url.clone(),
+            source: planned.source.clone(),
+        })
+        .collect::<Vec<_>>();
+    let extract = fetch
+        .iter()
+        .map(|planned| PlannedExtract {
+            dist_name: planned.dist_name.clone(),
+            fetched_dist: planned.dist_name.clone(),
+            source: planned.source.clone(),
+        })
+        .collect::<Vec<_>>();
+
     TransactionPlan {
-        fetch: link.clone(),
-        extract: link.clone(),
+        fetch,
+        extract,
         link,
         unlink,
     }

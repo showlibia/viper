@@ -35,9 +35,23 @@ pub struct PlannedUnlink {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PlannedFetch {
+    pub dist_name: String,
+    pub url: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlannedExtract {
+    pub dist_name: String,
+    pub fetched_dist: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TransactionPlan {
-    pub fetch: Vec<PlannedLink>,
-    pub extract: Vec<PlannedLink>,
+    pub fetch: Vec<PlannedFetch>,
+    pub extract: Vec<PlannedExtract>,
     pub link: Vec<PlannedLink>,
     pub unlink: Vec<PlannedUnlink>,
 }
@@ -93,9 +107,32 @@ impl TransactionPlan {
             }
         }
 
+        let fetch = link
+            .iter()
+            .filter(|planned| planned.source == "conda")
+            .map(|planned| PlannedFetch {
+                dist_name: if planned.dist_name.is_empty() {
+                    format!("{}-{}-{}", planned.name, planned.version, planned.build)
+                } else {
+                    planned.dist_name.clone()
+                },
+                url: planned.url.clone(),
+                source: planned.source.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let extract = fetch
+            .iter()
+            .map(|planned| PlannedExtract {
+                dist_name: planned.dist_name.clone(),
+                fetched_dist: planned.dist_name.clone(),
+                source: planned.source.clone(),
+            })
+            .collect::<Vec<_>>();
+
         Self {
-            fetch: link.clone(),
-            extract: link.clone(),
+            fetch,
+            extract,
             link,
             unlink,
         }
@@ -130,8 +167,8 @@ impl TransactionExecutor {
         plan: &TransactionPlan,
     ) -> Result<TransactionOutcome, CoreError> {
         if self.dry_run {
-            let fetched = self.run_fetch_phase(plan)?;
-            let extracted = self.run_extract_phase(plan)?;
+            let fetched = self.preview_fetch_phase(plan);
+            let extracted = self.preview_extract_phase(plan);
             let unlinked = state.remove_conda_unlinks(&plan.unlink);
             let linked =
                 state.install_conda_links(&plan.link, &self.requested_specs, &self.platform)?;
@@ -157,14 +194,14 @@ impl TransactionExecutor {
                 ensure_prefix_layout(prefix)?;
             }
 
-            fetched = self.run_fetch_phase(plan)?;
+            fetched = self.run_fetch_phase(prefix, plan)?;
             if should_fail("after_fetch") {
                 return Err(CoreError::TransactionFailed(
                     "injected failure after fetch phase".to_string(),
                 ));
             }
 
-            extracted = self.run_extract_phase(plan)?;
+            extracted = self.run_extract_phase(prefix, plan)?;
             if should_fail("after_extract") {
                 return Err(CoreError::TransactionFailed(
                     "injected failure after extract phase".to_string(),
@@ -218,6 +255,7 @@ impl TransactionExecutor {
                     "injected failure after history".to_string(),
                 ));
             }
+            self.cleanup_stage_artifacts(prefix)?;
             Ok(())
         })();
         if let Err(err) = tx_result {
@@ -235,22 +273,58 @@ impl TransactionExecutor {
         })
     }
 
-    fn run_fetch_phase(&self, plan: &TransactionPlan) -> Result<usize, CoreError> {
+    fn preview_fetch_phase(&self, plan: &TransactionPlan) -> usize {
+        plan.fetch.len()
+    }
+
+    fn preview_extract_phase(&self, plan: &TransactionPlan) -> usize {
+        plan.extract.len()
+    }
+
+    fn run_fetch_phase(&self, prefix: &Path, plan: &TransactionPlan) -> Result<usize, CoreError> {
         if should_fail("before_fetch") {
             return Err(CoreError::TransactionFailed(
                 "injected failure before fetch phase".to_string(),
             ));
         }
+        let stage_dir = fetch_stage_dir(prefix);
+        fs::create_dir_all(&stage_dir)?;
+        for fetch in &plan.fetch {
+            let path = stage_dir.join(format!("{}.fetched", fetch.dist_name));
+            fs::write(path, &fetch.url)?;
+        }
         Ok(plan.fetch.len())
     }
 
-    fn run_extract_phase(&self, plan: &TransactionPlan) -> Result<usize, CoreError> {
+    fn run_extract_phase(&self, prefix: &Path, plan: &TransactionPlan) -> Result<usize, CoreError> {
         if should_fail("before_extract") {
             return Err(CoreError::TransactionFailed(
                 "injected failure before extract phase".to_string(),
             ));
         }
+        let fetch_dir = fetch_stage_dir(prefix);
+        let extract_dir = extract_stage_dir(prefix);
+        fs::create_dir_all(&extract_dir)?;
+        for extract in &plan.extract {
+            let fetched_path = fetch_dir.join(format!("{}.fetched", extract.fetched_dist));
+            if !fetched_path.exists() {
+                return Err(CoreError::TransactionFailed(format!(
+                    "missing fetched artifact for '{}'",
+                    extract.dist_name
+                )));
+            }
+            let path = extract_dir.join(format!("{}.extracted", extract.dist_name));
+            fs::write(path, &extract.fetched_dist)?;
+        }
         Ok(plan.extract.len())
+    }
+
+    fn cleanup_stage_artifacts(&self, prefix: &Path) -> Result<(), CoreError> {
+        let stage_root = phase_stage_root(prefix);
+        if stage_root.exists() {
+            fs::remove_dir_all(stage_root)?;
+        }
+        Ok(())
     }
 }
 
@@ -353,4 +427,16 @@ fn should_fail(stage: &str) -> bool {
     std::env::var("VIPER_TX_FAIL_POINT")
         .ok()
         .is_some_and(|configured| configured == stage)
+}
+
+fn phase_stage_root(prefix: &Path) -> PathBuf {
+    prefix.join("pkgs").join(".viper-transaction")
+}
+
+fn fetch_stage_dir(prefix: &Path) -> PathBuf {
+    phase_stage_root(prefix).join("fetch")
+}
+
+fn extract_stage_dir(prefix: &Path) -> PathBuf {
+    phase_stage_root(prefix).join("extract")
 }
