@@ -28,6 +28,13 @@ struct NormalizedRequestInputs {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileSpecKindGroup {
+    Yaml,
+    NonYaml,
+    Lock,
+}
+
 pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> {
     let globals = request.globals.clone();
     let op = request.op;
@@ -539,20 +546,24 @@ fn normalize_request_inputs(
     let mut yaml_file_stem = None;
     let mut yaml_channels = Vec::new();
     let mut warnings = Vec::new();
-    let mut file_kind_is_yaml: Option<bool> = None;
+    let mut file_kind_group: Option<FileSpecKindGroup> = None;
 
     for path in files {
         let parsed = parse_spec_file(&path)?;
-        let is_yaml = matches!(parsed.kind, SpecFileKind::Yaml);
-        if let Some(expected) = file_kind_is_yaml {
-            if expected != is_yaml {
+        let current_group = match parsed.kind {
+            SpecFileKind::Yaml => FileSpecKindGroup::Yaml,
+            SpecFileKind::Lock => FileSpecKindGroup::Lock,
+            SpecFileKind::Classic | SpecFileKind::Explicit => FileSpecKindGroup::NonYaml,
+        };
+        if let Some(expected) = file_kind_group {
+            if expected != current_group {
                 return Err(CoreError::InvalidEnvironmentFile(format!(
-                    "all --file inputs must be either YAML or non-YAML, got mixed types at '{}'",
+                    "all --file inputs must have the same format group (YAML, lockfile, or non-YAML), got mixed types at '{}'",
                     path.display()
                 )));
             }
         } else {
-            file_kind_is_yaml = Some(is_yaml);
+            file_kind_group = Some(current_group);
         }
 
         if parsed.kind == SpecFileKind::Explicit {
@@ -568,14 +579,18 @@ fn normalize_request_inputs(
         }
         if parsed.kind == SpecFileKind::Lock {
             explicit_mode = true;
-            explicit_specs = parsed.env.conda_specs;
+            if explicit_specs.is_empty() {
+                explicit_specs = parsed.env.conda_specs;
+            } else {
+                explicit_specs.extend(parsed.env.conda_specs);
+            }
             conda_specs.clear();
-            pip_specs = parsed.env.pip_specs;
+            pip_specs.extend(parsed.env.pip_specs);
             warnings.push(format!(
                 "lockfile '{}' switches request into locked explicit mode",
                 path.display()
             ));
-            break;
+            continue;
         }
 
         let env = parsed.env;

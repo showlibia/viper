@@ -1977,7 +1977,7 @@ fn create_rejects_mixed_file_spec_types() {
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|msg| msg.contains("must be either YAML or non-YAML"))
+            .is_some_and(|msg| msg.contains("same format group"))
     );
 }
 
@@ -2272,6 +2272,45 @@ fn create_accepts_mambajs_lockfile_input() {
 
     let names = installed_package_names(&prefix);
     assert!(names.iter().any(|name| name == "zlib"));
+}
+
+#[test]
+fn create_rejects_mixed_lockfile_and_classic_files() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let subdir = current_platform_subdir();
+    let source = mamba_lockfile_fixture(&format!("test-env-lock-{subdir}.json"));
+    let lockfile = tmp.path().join("test-env-lock.json");
+    fs::copy(source, &lockfile).expect("copy mambajs lockfile");
+    let classic = tmp.path().join("specs.txt");
+    fs::write(&classic, "python\n").expect("write classic specs");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            lockfile.to_str().expect("utf8"),
+            "-f",
+            classic.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("same format group"))
+    );
 }
 
 #[test]

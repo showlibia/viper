@@ -301,10 +301,16 @@ pub fn solve_to_actions(
             for spec in specs {
                 errors.push(format!("unsatisfied: requested spec '{spec}'"));
             }
+            let requested_names = specs
+                .iter()
+                .filter_map(|spec| package_name_from_spec(spec).ok())
+                .collect::<HashSet<_>>();
             let mut dep_specs = HashSet::new();
             for pkg in packages {
-                for dep in &pkg.depends {
-                    dep_specs.insert(dep.clone());
+                if requested_names.contains(&pkg.name) {
+                    for dep in &pkg.depends {
+                        dep_specs.insert(dep.clone());
+                    }
                 }
             }
             for dep in dep_specs {
