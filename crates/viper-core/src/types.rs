@@ -121,10 +121,16 @@ fn default_base_url() -> String {
 fn default_platform() -> String {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "linux-64".to_string(),
+        ("linux", "x86") | ("linux", "i686") => "linux-32".to_string(),
         ("linux", "aarch64") => "linux-aarch64".to_string(),
+        ("linux", "armv7") | ("linux", "armv7l") => "linux-armv7l".to_string(),
+        ("linux", "armv6") | ("linux", "armv6l") => "linux-armv6l".to_string(),
+        ("linux", "riscv64") => "linux-riscv64".to_string(),
         ("macos", "x86_64") => "osx-64".to_string(),
         ("macos", "aarch64") => "osx-arm64".to_string(),
         ("windows", "x86_64") => "win-64".to_string(),
+        ("windows", "aarch64") => "win-arm64".to_string(),
+        ("windows", "x86") | ("windows", "i686") => "win-32".to_string(),
         (os, arch) => format!("{os}-{arch}"),
     }
 }

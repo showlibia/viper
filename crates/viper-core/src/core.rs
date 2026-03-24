@@ -1375,7 +1375,6 @@ fn normalize_channel_base_urls(channel: &str, platform: &str) -> Vec<String> {
         let mut defaults = vec![
             "https://repo.anaconda.com/pkgs/main".to_string(),
             "https://repo.anaconda.com/pkgs/r".to_string(),
-            "https://repo.anaconda.com/pkgs/pro".to_string(),
         ];
         if platform.starts_with("win-") {
             defaults.push("https://repo.anaconda.com/pkgs/msys2".to_string());
@@ -1595,8 +1594,6 @@ mod tests {
                 "https://repo.anaconda.com/pkgs/main/noarch".to_string(),
                 "https://repo.anaconda.com/pkgs/r/linux-64".to_string(),
                 "https://repo.anaconda.com/pkgs/r/noarch".to_string(),
-                "https://repo.anaconda.com/pkgs/pro/linux-64".to_string(),
-                "https://repo.anaconda.com/pkgs/pro/noarch".to_string(),
                 "https://repo.example.com/team/conda/linux-64".to_string(),
                 "https://repo.example.com/team/conda/noarch".to_string(),
             ]
