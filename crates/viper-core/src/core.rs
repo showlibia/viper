@@ -518,7 +518,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let env_exists = info_target_prefix.exists();
             let (environment, env_location) =
                 info_environment_status(Some(info_target_prefix), &config.root_prefix);
-            let populated_config_files = if globals.no_rc {
+            let populated_config_files = if globals.no_rc || !store.path().exists() {
                 Vec::<std::path::PathBuf>::new()
             } else {
                 vec![store.path().to_path_buf()]
@@ -1131,18 +1131,40 @@ fn package_channel(pkg: &PackageRecord) -> String {
 
 fn format_channel_name(channel: &str) -> String {
     let trimmed = channel.trim_end_matches('/');
-    if let Some(rest) = trimmed.strip_prefix("https://conda.anaconda.org/") {
-        return rest.to_string();
+    let without_repodata = trimmed
+        .trim_end_matches("/repodata.json")
+        .trim_end_matches("/current_repodata.json");
+    let without_scheme = without_repodata
+        .strip_prefix("https://")
+        .or_else(|| without_repodata.strip_prefix("http://"))
+        .unwrap_or(without_repodata);
+    let display = without_scheme
+        .strip_prefix("conda.anaconda.org/")
+        .unwrap_or(without_scheme);
+    let Some((prefix, suffix)) = display.rsplit_once('/') else {
+        return display.to_string();
+    };
+    if is_known_conda_subdir(suffix) {
+        prefix.to_string()
+    } else {
+        display.to_string()
     }
-    if let Some(rest) = trimmed.strip_prefix("http://conda.anaconda.org/") {
-        return rest.to_string();
-    }
-    trimmed
-        .rsplit('/')
-        .next()
-        .filter(|seg| !seg.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| trimmed.to_string())
+}
+
+fn is_known_conda_subdir(value: &str) -> bool {
+    matches!(
+        value,
+        "noarch"
+            | "linux-64"
+            | "linux-aarch64"
+            | "linux-ppc64le"
+            | "linux-s390x"
+            | "osx-64"
+            | "osx-arm64"
+            | "win-32"
+            | "win-64"
+            | "win-arm64"
+    )
 }
 
 fn package_base_url(pkg: &PackageRecord) -> String {
@@ -1346,5 +1368,25 @@ mod tests {
             .expect("solve via core production entry");
         assert_eq!(solved.actions.len(), 1);
         assert_eq!(solved.actions[0].name, "python");
+    }
+
+    #[test]
+    fn format_channel_name_preserves_custom_paths() {
+        assert_eq!(
+            format_channel_name("https://conda.anaconda.org/conda-forge/linux-64"),
+            "conda-forge"
+        );
+        assert_eq!(
+            format_channel_name("https://repo.example.com/team/conda/linux-64"),
+            "repo.example.com/team/conda"
+        );
+        assert_eq!(
+            format_channel_name("https://repo.example.com/pkgs/main/noarch"),
+            "repo.example.com/pkgs/main"
+        );
+        assert_eq!(
+            format_channel_name("https://repo.example.com/custom/channel"),
+            "repo.example.com/custom/channel"
+        );
     }
 }

@@ -368,6 +368,25 @@ fn config_set_get_and_info() {
 }
 
 #[test]
+fn info_reports_empty_populated_config_files_when_rc_missing() {
+    let tmp_home = tempdir().expect("create temp home");
+    let mut info = Command::cargo_bin("viper").expect("binary exists");
+    let output = info
+        .env("HOME", tmp_home.path())
+        .args(["info", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(
+        body["data"]["populated config files"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
 fn info_environment_status_reports_active_not_env_and_not_found() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
