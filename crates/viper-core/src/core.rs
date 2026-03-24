@@ -975,10 +975,11 @@ fn platform_subdir(os: &str, arch: &str) -> String {
 
 fn current_virtual_packages() -> Vec<String> {
     let os = std::env::consts::OS;
-    let arch = std::env::var("CONDA_OVERRIDE_ARCHSPEC")
+    let platform = current_platform_subdir();
+    let archspec = std::env::var("CONDA_OVERRIDE_ARCHSPEC")
         .ok()
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| std::env::consts::ARCH.to_string());
+        .unwrap_or_else(|| archspec_for_platform(&platform));
     let mut packages = Vec::new();
     match os {
         "linux" => {
@@ -1021,8 +1022,65 @@ fn current_virtual_packages() -> Vec<String> {
         }
         _ => {}
     }
-    packages.push(format!("__archspec=1={arch}"));
+    packages.push(format!("__archspec=1={archspec}"));
     packages
+}
+
+fn archspec_for_platform(platform: &str) -> String {
+    if matches!(platform, "linux-64" | "osx-64" | "win-64") {
+        return detect_x86_64_archspec();
+    }
+    if platform.ends_with("arm64") || platform.ends_with("aarch64") {
+        return "arm64".to_string();
+    }
+    if platform.ends_with("32") {
+        return "x86".to_string();
+    }
+    if platform.ends_with("ppc64le")
+        || platform.ends_with("s390x")
+        || platform.ends_with("riscv64")
+        || platform.ends_with("armv7l")
+        || platform.ends_with("armv6l")
+    {
+        return platform
+            .rsplit('-')
+            .next()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| platform.to_string());
+    }
+    platform
+        .rsplit('-')
+        .next()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| platform.to_string())
+}
+
+fn detect_x86_64_archspec() -> String {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("avx512cd")
+            && std::is_x86_feature_detected!("avx512dq")
+            && std::is_x86_feature_detected!("avx512vl")
+        {
+            return "x86_64_v4".to_string();
+        }
+        if std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("bmi1")
+            && std::is_x86_feature_detected!("bmi2")
+            && std::is_x86_feature_detected!("fma")
+        {
+            return "x86_64_v3".to_string();
+        }
+        if std::is_x86_feature_detected!("popcnt")
+            && std::is_x86_feature_detected!("sse4.2")
+            && std::is_x86_feature_detected!("ssse3")
+        {
+            return "x86_64_v2".to_string();
+        }
+    }
+    "x86_64".to_string()
 }
 
 fn probe_linux_kernel_version() -> Option<String> {
@@ -1059,16 +1117,23 @@ fn probe_command_output(command: &str, args: &[&str]) -> Option<String> {
 }
 
 fn parse_windows_version_from_ver_output(output: &str) -> Option<String> {
-    let marker = "Version ";
-    let start = output.find(marker)? + marker.len();
-    let rest = &output[start..];
-    let end = rest.find(']').unwrap_or(rest.len());
-    let value = rest[..end].trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
+    let mut started = false;
+    let mut value = String::new();
+    for ch in output.chars() {
+        if !started {
+            if ch.is_ascii_digit() {
+                started = true;
+                value.push(ch);
+            }
+            continue;
+        }
+        if ch.is_ascii_digit() || ch == '.' {
+            value.push(ch);
+        } else {
+            break;
+        }
     }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn select_repodata_source(specs: &[String]) -> RepodataSource {
@@ -1613,5 +1678,16 @@ mod tests {
             parse_windows_version_from_ver_output("Microsoft Windows [Version 10.0.22621.3007]"),
             Some("10.0.22621.3007".to_string())
         );
+        assert_eq!(
+            parse_windows_version_from_ver_output("Microsoft Windows [Версия 10.0.22621.3007]"),
+            Some("10.0.22621.3007".to_string())
+        );
+    }
+
+    #[test]
+    fn archspec_for_platform_uses_platform_tokens() {
+        assert_eq!(archspec_for_platform("win-arm64"), "arm64");
+        assert_eq!(archspec_for_platform("linux-riscv64"), "riscv64");
+        assert!(archspec_for_platform("linux-64").starts_with("x86_64"));
     }
 }
