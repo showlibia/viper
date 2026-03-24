@@ -88,6 +88,19 @@ impl ConfigStore {
         fs::write(&self.path, raw)?;
         Ok(())
     }
+
+    pub fn has_populated_values(&self) -> Result<bool, CoreError> {
+        if !self.path.exists() {
+            return Ok(false);
+        }
+        let rc = self.load_rc()?;
+        Ok(rc.root_prefix.is_some()
+            || rc.channels.is_some()
+            || rc.channel_priority.is_some()
+            || rc.always_yes.is_some()
+            || rc.offline.is_some()
+            || rc.local_repodata_ttl.is_some())
+    }
 }
 
 fn parse_bool(value: &str) -> Result<bool, CoreError> {

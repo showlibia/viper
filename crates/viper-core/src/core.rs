@@ -518,10 +518,15 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             let env_exists = info_target_prefix.exists();
             let (environment, env_location) =
                 info_environment_status(Some(info_target_prefix), &config.root_prefix);
-            let populated_config_files = if globals.no_rc || !store.path().exists() {
-                Vec::<std::path::PathBuf>::new()
+            let has_populated_config = if globals.no_rc {
+                false
             } else {
+                store.has_populated_values()?
+            };
+            let populated_config_files = if has_populated_config {
                 vec![store.path().to_path_buf()]
+            } else {
+                Vec::<std::path::PathBuf>::new()
             };
             let channel_urls = expanded_channel_urls(&config.channels, &current_platform_subdir());
             Ok(OperationResult::ok(
@@ -548,7 +553,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "user_config_files": [store.path()],
                     "user config files": [store.path()],
                     "populated config files": populated_config_files,
-                    "virtual packages": [],
+                    "virtual packages": current_virtual_packages(),
                     "base_environment": config.root_prefix,
                     "base environment": config.root_prefix,
                     "platform": current_platform_subdir(),
@@ -955,7 +960,7 @@ fn platform_subdir(os: &str, arch: &str) -> String {
         ("linux", "x86_64") => "linux-64".to_string(),
         ("linux", "x86") | ("linux", "i686") => "linux-32".to_string(),
         ("linux", "aarch64") => "linux-aarch64".to_string(),
-        ("linux", "arm") | ("linux", "armv7") | ("linux", "armv7l") => "linux-armv7l".to_string(),
+        ("linux", "armv7") | ("linux", "armv7l") => "linux-armv7l".to_string(),
         ("linux", "armv6") | ("linux", "armv6l") => "linux-armv6l".to_string(),
         ("linux", "riscv64") => "linux-riscv64".to_string(),
         ("macos", "x86_64") => "osx-64".to_string(),
@@ -965,6 +970,29 @@ fn platform_subdir(os: &str, arch: &str) -> String {
         ("windows", "x86") | ("windows", "i686") => "win-32".to_string(),
         _ => format!("{os}-{arch}"),
     }
+}
+
+fn current_virtual_packages() -> Vec<String> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let mut packages = Vec::new();
+    match os {
+        "linux" => {
+            packages.push("__unix=0=0".to_string());
+            packages.push("__linux=0=0".to_string());
+            packages.push("__glibc=2.17=0".to_string());
+        }
+        "macos" => {
+            packages.push("__unix=0=0".to_string());
+            packages.push("__osx=0=0".to_string());
+        }
+        "windows" => {
+            packages.push("__win=0=0".to_string());
+        }
+        _ => {}
+    }
+    packages.push(format!("__archspec=1={arch}"));
+    packages
 }
 
 fn select_repodata_source(specs: &[String]) -> RepodataSource {
@@ -1475,6 +1503,7 @@ mod tests {
     #[test]
     fn platform_subdir_maps_windows_arm64_and_known_conda_subdirs() {
         assert_eq!(platform_subdir("windows", "aarch64"), "win-arm64");
+        assert_eq!(platform_subdir("linux", "arm"), "linux-arm");
         assert!(is_known_conda_subdir("linux-riscv64"));
     }
 }

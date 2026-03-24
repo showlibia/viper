@@ -334,7 +334,11 @@ fn config_set_get_and_info() {
     assert!(info_json["data"]["user_config_files"].is_array());
     assert!(info_json["data"]["user config files"].is_array());
     assert!(info_json["data"]["populated config files"].is_array());
-    assert!(info_json["data"]["virtual packages"].is_array());
+    assert!(
+        info_json["data"]["virtual packages"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty() && entries.iter().all(|v| v.is_string()))
+    );
     assert!(info_json["data"]["environment"].is_string());
     assert!(info_json["data"]["env location"].is_string());
     assert!(info_json["data"]["base_environment"].is_string());
