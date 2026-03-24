@@ -480,6 +480,29 @@ fn info_environment_status_reports_active_not_env_and_not_found() {
         body["data"]["env location"],
         root_prefix.to_str().expect("utf8")
     );
+
+    let mut base_active = Command::cargo_bin("viper").expect("binary exists");
+    let output = base_active
+        .env("HOME", tmp_home.path())
+        .env("CONDA_PREFIX", &root_prefix)
+        .args([
+            "--no-rc",
+            "--root-prefix",
+            root_prefix.to_str().expect("utf8"),
+            "info",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["data"]["environment"], "base (active)");
+    assert_eq!(
+        body["data"]["env location"],
+        root_prefix.to_str().expect("utf8")
+    );
 }
 
 #[test]
