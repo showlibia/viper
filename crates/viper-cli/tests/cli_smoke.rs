@@ -320,6 +320,7 @@ fn config_set_get_and_info() {
     let root_prefix = info_json["data"]["root_prefix"]
         .as_str()
         .expect("root_prefix is string");
+    assert_eq!(info_json["data"]["target_prefix"], root_prefix);
     assert_eq!(info_json["data"]["platform"], current_platform_subdir());
     assert_eq!(info_json["data"]["environment"], "base");
     assert_eq!(info_json["data"]["env location"], root_prefix);
@@ -562,7 +563,7 @@ fn info_json_snapshot_is_stable() {
     body["data"]["virtual packages"] = serde_json::json!([]);
     body["data"]["base_environment"] = serde_json::json!("<base_environment>");
     body["data"]["base environment"] = serde_json::json!("<base_environment>");
-    body["data"]["target_prefix"] = serde_json::json!(null);
+    body["data"]["target_prefix"] = serde_json::json!("<target_prefix>");
     assert_json_snapshot!("info_json_snapshot", body);
 }
 
@@ -868,11 +869,10 @@ fn list_plain_output_shows_ignored_mode_warnings() {
         .assert()
         .success()
         .get_output()
-        .stdout
         .clone();
-    let stdout = String::from_utf8(output).expect("utf8");
-    assert!(stdout.contains("warning: Option --canonical ignored because --explicit"));
-    assert!(stdout.contains("warning: Option --export ignored because --explicit"));
+    let stderr = String::from_utf8(output.stderr).expect("utf8");
+    assert!(stderr.contains("warning: Option --canonical ignored because --explicit"));
+    assert!(stderr.contains("warning: Option --export ignored because --explicit"));
 }
 
 #[test]

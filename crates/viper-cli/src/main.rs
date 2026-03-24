@@ -224,7 +224,7 @@ fn print_result(result: &OperationResult, as_json: bool) -> Result<()> {
     }
 
     for warning in &result.warnings {
-        println!("warning: {warning}");
+        eprintln!("warning: {warning}");
     }
     println!("{}", result.message);
     if result.data != serde_json::Value::Null {

@@ -538,7 +538,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "curl version": "unknown",
                     "libarchive version": "unknown",
                     "root_prefix": config.root_prefix,
-                    "target_prefix": config.target_prefix,
+                    "target_prefix": info_target_prefix,
                     "channels": channel_urls,
                     "channel_priority": config.channel_priority,
                     "offline": config.offline,
@@ -1456,7 +1456,8 @@ fn normalize_channel_base_urls(channel: &str, platform: &str) -> Vec<String> {
     } else {
         format!("https://conda.anaconda.org/{trimmed}")
     };
-    vec![strip_known_subdir_suffix(&normalized)]
+    let sanitized = strip_url_credentials(&normalized);
+    vec![strip_known_subdir_suffix(&sanitized)]
 }
 
 fn strip_repodata_suffix(value: &str) -> &str {
@@ -1474,6 +1475,23 @@ fn strip_known_subdir_suffix(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn strip_url_credentials(value: &str) -> String {
+    if !(value.starts_with("http://") || value.starts_with("https://")) {
+        return value.to_string();
+    }
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return value.to_string();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let path = &rest[authority_end..];
+    let sanitized_authority = authority
+        .split_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
+    format!("{scheme}://{sanitized_authority}{path}")
 }
 
 fn requested_names(specs: &[String]) -> HashSet<String> {
@@ -1689,5 +1707,17 @@ mod tests {
         assert_eq!(archspec_for_platform("win-arm64"), "arm64");
         assert_eq!(archspec_for_platform("linux-riscv64"), "riscv64");
         assert!(archspec_for_platform("linux-64").starts_with("x86_64"));
+    }
+
+    #[test]
+    fn strip_url_credentials_removes_userinfo() {
+        assert_eq!(
+            strip_url_credentials("https://user:token@repo.example.com/team"),
+            "https://repo.example.com/team"
+        );
+        assert_eq!(
+            strip_url_credentials("https://repo.example.com/team"),
+            "https://repo.example.com/team"
+        );
     }
 }

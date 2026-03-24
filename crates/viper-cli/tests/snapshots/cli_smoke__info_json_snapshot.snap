@@ -1,6 +1,6 @@
 ---
 source: crates/viper-cli/tests/cli_smoke.rs
-assertion_line: 511
+assertion_line: 567
 expression: body
 ---
 {
@@ -38,7 +38,7 @@ expression: body
     "platform": "linux-64",
     "populated config files": [],
     "root_prefix": "<root_prefix>",
-    "target_prefix": null,
+    "target_prefix": "<target_prefix>",
     "user config files": [
       "<config_file>"
     ],
