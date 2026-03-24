@@ -1131,15 +1131,14 @@ fn package_channel(pkg: &PackageRecord) -> String {
 
 fn format_channel_name(channel: &str) -> String {
     let trimmed = channel.trim_end_matches('/');
-    let without_repodata = trimmed
-        .trim_end_matches("/repodata.json")
-        .trim_end_matches("/current_repodata.json");
+    let without_repodata = strip_repodata_suffix(trimmed);
     let without_scheme = without_repodata
         .strip_prefix("https://")
         .or_else(|| without_repodata.strip_prefix("http://"))
         .unwrap_or(without_repodata);
     let display = without_scheme
         .strip_prefix("conda.anaconda.org/")
+        .or_else(|| without_scheme.strip_prefix("repo.anaconda.com/"))
         .unwrap_or(without_scheme);
     let Some((prefix, suffix)) = display.rsplit_once('/') else {
         return display.to_string();
@@ -1221,34 +1220,58 @@ fn info_environment_status(
 fn expanded_channel_urls(channels: &[String], platform: &str) -> Vec<String> {
     let mut urls = Vec::new();
     for channel in channels {
-        let base = normalize_channel_base_url(channel);
-        for suffix in [platform, "noarch"] {
-            let url = format!("{base}/{suffix}");
-            if !urls.iter().any(|existing| existing == &url) {
-                urls.push(url);
+        let bases = normalize_channel_base_urls(channel, platform);
+        for base in bases {
+            for suffix in [platform, "noarch"] {
+                let url = format!("{base}/{suffix}");
+                if !urls.iter().any(|existing| existing == &url) {
+                    urls.push(url);
+                }
             }
         }
     }
     urls
 }
 
-fn normalize_channel_base_url(channel: &str) -> String {
-    let trimmed = channel
-        .trim_end_matches('/')
-        .trim_end_matches("/repodata.json")
-        .trim_end_matches("/current_repodata.json");
-    let normalized = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+fn normalize_channel_base_urls(channel: &str, platform: &str) -> Vec<String> {
+    let trimmed = strip_repodata_suffix(channel.trim_end_matches('/'));
+    if trimmed == "defaults" {
+        let mut defaults = vec![
+            "https://repo.anaconda.com/pkgs/main".to_string(),
+            "https://repo.anaconda.com/pkgs/r".to_string(),
+        ];
+        if platform.starts_with("win-") {
+            defaults.push("https://repo.anaconda.com/pkgs/msys2".to_string());
+        }
+        return defaults;
+    }
+    let normalized = if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("file://")
+    {
         trimmed.to_string()
+    } else if trimmed.starts_with("pkgs/") {
+        format!("https://repo.anaconda.com/{trimmed}")
     } else {
         format!("https://conda.anaconda.org/{trimmed}")
     };
-    let Some((prefix, suffix)) = normalized.rsplit_once('/') else {
-        return normalized;
+    vec![strip_known_subdir_suffix(&normalized)]
+}
+
+fn strip_repodata_suffix(value: &str) -> &str {
+    value
+        .trim_end_matches("/repodata.json")
+        .trim_end_matches("/current_repodata.json")
+}
+
+fn strip_known_subdir_suffix(value: &str) -> String {
+    let Some((prefix, suffix)) = value.rsplit_once('/') else {
+        return value.to_string();
     };
     if is_known_conda_subdir(suffix) {
         prefix.to_string()
     } else {
-        normalized
+        value.to_string()
     }
 }
 
@@ -1394,6 +1417,10 @@ mod tests {
             "conda-forge"
         );
         assert_eq!(
+            format_channel_name("https://repo.anaconda.com/pkgs/main/linux-64"),
+            "pkgs/main"
+        );
+        assert_eq!(
             format_channel_name("https://repo.example.com/team/conda/linux-64"),
             "repo.example.com/team/conda"
         );
@@ -1413,6 +1440,7 @@ mod tests {
             &[
                 "conda-forge".to_string(),
                 "https://conda.anaconda.org/conda-forge/linux-64".to_string(),
+                "defaults".to_string(),
                 "https://repo.example.com/team/conda/noarch".to_string(),
             ],
             "linux-64",
@@ -1422,6 +1450,10 @@ mod tests {
             vec![
                 "https://conda.anaconda.org/conda-forge/linux-64".to_string(),
                 "https://conda.anaconda.org/conda-forge/noarch".to_string(),
+                "https://repo.anaconda.com/pkgs/main/linux-64".to_string(),
+                "https://repo.anaconda.com/pkgs/main/noarch".to_string(),
+                "https://repo.anaconda.com/pkgs/r/linux-64".to_string(),
+                "https://repo.anaconda.com/pkgs/r/noarch".to_string(),
                 "https://repo.example.com/team/conda/linux-64".to_string(),
                 "https://repo.example.com/team/conda/noarch".to_string(),
             ]
