@@ -317,9 +317,12 @@ fn config_set_get_and_info() {
         .clone();
     let info_json: Value = serde_json::from_slice(&output).expect("valid json");
     assert_eq!(info_json["success"], true);
+    let root_prefix = info_json["data"]["root_prefix"]
+        .as_str()
+        .expect("root_prefix is string");
     assert_eq!(info_json["data"]["platform"], current_platform_subdir());
-    assert_eq!(info_json["data"]["environment"], "None");
-    assert_eq!(info_json["data"]["env location"], "-");
+    assert_eq!(info_json["data"]["environment"], "base");
+    assert_eq!(info_json["data"]["env location"], root_prefix);
     assert_eq!(
         info_json["data"]["populated config files"],
         serde_json::json!([])
@@ -395,6 +398,10 @@ fn info_environment_status_reports_active_not_env_and_not_found() {
         .clone();
     let body: Value = serde_json::from_slice(&output).expect("valid json");
     assert_eq!(body["data"]["environment"], "demo (active)");
+    assert_eq!(
+        body["data"]["env location"],
+        named_prefix.to_str().expect("utf8")
+    );
 
     let mut not_env = Command::cargo_bin("viper").expect("binary exists");
     let output = not_env
@@ -418,6 +425,10 @@ fn info_environment_status_reports_active_not_env_and_not_found() {
         body["data"]["environment"]
             .as_str()
             .is_some_and(|name| name.contains("(not env)"))
+    );
+    assert_eq!(
+        body["data"]["env location"],
+        not_env_prefix.to_str().expect("utf8")
     );
 
     let mut missing = Command::cargo_bin("viper").expect("binary exists");
@@ -443,6 +454,32 @@ fn info_environment_status_reports_active_not_env_and_not_found() {
             .as_str()
             .is_some_and(|name| name.contains("(not found)"))
     );
+    assert_eq!(
+        body["data"]["env location"],
+        missing_prefix.to_str().expect("utf8")
+    );
+
+    let mut default_info = Command::cargo_bin("viper").expect("binary exists");
+    let output = default_info
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--root-prefix",
+            root_prefix.to_str().expect("utf8"),
+            "info",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["data"]["environment"], "base");
+    assert_eq!(
+        body["data"]["env location"],
+        root_prefix.to_str().expect("utf8")
+    );
 }
 
 #[test]
@@ -465,7 +502,6 @@ fn info_json_snapshot_is_stable() {
     body["data"]["envs directories"] = serde_json::json!(["<envs_dir>"]);
     body["data"]["user_config_files"] = serde_json::json!(["<config_file>"]);
     body["data"]["user config files"] = serde_json::json!(["<config_file>"]);
-    body["data"]["populated config files"] = serde_json::json!(["<config_file>"]);
     body["data"]["environment"] = serde_json::json!("<environment>");
     body["data"]["env location"] = serde_json::json!("<env_location>");
     body["data"]["virtual packages"] = serde_json::json!([]);
@@ -586,6 +622,7 @@ dependencies:
             "list",
             "-p",
             prefix.to_str().expect("utf8"),
+            "--no-pip",
             "--canonical",
             "--json",
         ])
@@ -595,11 +632,21 @@ dependencies:
         .stdout
         .clone();
     let body: Value = serde_json::from_slice(&output).expect("valid json");
-    let canonical_rows = body["data"]["packages"].as_array().expect("canonical rows");
-    assert!(canonical_rows.iter().all(|row| {
-        row.as_str()
-            .is_some_and(|s| s.contains("::") && s.contains("/linux-64::"))
-    }));
+    let mut canonical_rows = body["data"]["packages"]
+        .as_array()
+        .expect("canonical rows")
+        .iter()
+        .map(|row| row.as_str().expect("canonical row string").to_string())
+        .collect::<Vec<_>>();
+    canonical_rows.sort();
+    let subdir = current_platform_subdir();
+    let mut expected_rows = vec![
+        format!("conda-forge/{subdir}::pip-24.0-0"),
+        format!("conda-forge/{subdir}::python-3.12.0-0"),
+    ];
+    expected_rows.sort();
+    assert_eq!(canonical_rows, expected_rows);
+    assert!(canonical_rows.iter().all(|row| !row.contains(' ')));
 
     let mut export = Command::cargo_bin("viper").expect("binary exists");
     let output = export

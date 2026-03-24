@@ -514,13 +514,10 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
             Ok(result)
         }
         CliOperation::Info => {
-            let env_exists = config
-                .target_prefix
-                .as_ref()
-                .map(|p| p.exists())
-                .unwrap_or(false);
+            let info_target_prefix = config.target_prefix.as_ref().unwrap_or(&config.root_prefix);
+            let env_exists = info_target_prefix.exists();
             let (environment, env_location) =
-                info_environment_status(config.target_prefix.as_ref(), &config.root_prefix);
+                info_environment_status(Some(info_target_prefix), &config.root_prefix);
             let populated_config_files = if globals.no_rc {
                 Vec::<std::path::PathBuf>::new()
             } else {
