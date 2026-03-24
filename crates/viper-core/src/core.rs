@@ -519,31 +519,30 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 .as_ref()
                 .map(|p| p.exists())
                 .unwrap_or(false);
-            let env_location = config
-                .target_prefix
-                .clone()
-                .unwrap_or_else(|| config.root_prefix.clone());
-            let env_name = if env_location == config.root_prefix {
-                "base".to_string()
+            let (environment, env_location) =
+                info_environment_status(config.target_prefix.as_ref(), &config.root_prefix);
+            let populated_config_files = if globals.no_rc {
+                Vec::<std::path::PathBuf>::new()
             } else {
-                env_location
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| env_location.display().to_string())
+                vec![store.path().to_path_buf()]
             };
+            let channel_urls = expanded_channel_urls(&config.channels, &current_platform_subdir());
             Ok(OperationResult::ok(
                 "environment info",
                 json!({
+                    "libmamba version": env!("CARGO_PKG_VERSION"),
+                    "mamba version": env!("CARGO_PKG_VERSION"),
+                    "curl version": "unknown",
+                    "libarchive version": "unknown",
                     "root_prefix": config.root_prefix,
                     "target_prefix": config.target_prefix,
-                    "channels": config.channels,
+                    "channels": channel_urls,
                     "channel_priority": config.channel_priority,
                     "offline": config.offline,
                     "local_repodata_ttl": config.local_repodata_ttl,
                     "json": config.json,
                     "env_exists": env_exists,
-                    "environment": env_name,
+                    "environment": environment,
                     "env location": env_location,
                     "envs_dirs": [config.root_prefix.join("envs")],
                     "envs directories": [config.root_prefix.join("envs")],
@@ -551,11 +550,11 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "package cache": [config.root_prefix.join("pkgs")],
                     "user_config_files": [store.path()],
                     "user config files": [store.path()],
-                    "populated config files": [store.path()],
+                    "populated config files": populated_config_files,
                     "virtual packages": [],
                     "base_environment": config.root_prefix,
                     "base environment": config.root_prefix,
-                    "platform": std::env::consts::OS,
+                    "platform": current_platform_subdir(),
                     "arch": std::env::consts::ARCH,
                 }),
             ))
@@ -1165,6 +1164,56 @@ fn dedup_specs(specs: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+fn info_environment_status(
+    target_prefix: Option<&std::path::PathBuf>,
+    root_prefix: &std::path::Path,
+) -> (String, String) {
+    let Some(target) = target_prefix else {
+        return ("None".to_string(), "-".to_string());
+    };
+    let mut name = if target == root_prefix {
+        "base".to_string()
+    } else {
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| target.display().to_string())
+    };
+    let target_display = target.display().to_string();
+    if std::env::var_os("CONDA_PREFIX")
+        .map(std::path::PathBuf::from)
+        .is_some_and(|active| active == *target)
+    {
+        name.push_str(" (active)");
+    } else if target.exists() {
+        let is_env = target == root_prefix || target.join("conda-meta").exists();
+        if !is_env {
+            name.push_str(" (not env)");
+        }
+    } else {
+        name.push_str(" (not found)");
+    }
+    (name, target_display)
+}
+
+fn expanded_channel_urls(channels: &[String], platform: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for channel in channels {
+        let base = if channel.starts_with("http://") || channel.starts_with("https://") {
+            channel.trim_end_matches('/').to_string()
+        } else {
+            format!(
+                "https://conda.anaconda.org/{}",
+                channel.trim_end_matches('/')
+            )
+        };
+        urls.push(format!("{base}/{platform}"));
+        urls.push(format!("{base}/noarch"));
+    }
+    urls
 }
 
 fn requested_names(specs: &[String]) -> HashSet<String> {

@@ -317,7 +317,13 @@ fn config_set_get_and_info() {
         .clone();
     let info_json: Value = serde_json::from_slice(&output).expect("valid json");
     assert_eq!(info_json["success"], true);
-    assert!(info_json["data"]["platform"].is_string());
+    assert_eq!(info_json["data"]["platform"], current_platform_subdir());
+    assert_eq!(info_json["data"]["environment"], "None");
+    assert_eq!(info_json["data"]["env location"], "-");
+    assert_eq!(
+        info_json["data"]["populated config files"],
+        serde_json::json!([])
+    );
     assert!(info_json["data"]["envs_dirs"].is_array());
     assert!(info_json["data"]["envs directories"].is_array());
     assert!(info_json["data"]["package_cache"].is_array());
@@ -330,6 +336,18 @@ fn config_set_get_and_info() {
     assert!(info_json["data"]["env location"].is_string());
     assert!(info_json["data"]["base_environment"].is_string());
     assert!(info_json["data"]["base environment"].is_string());
+    assert!(
+        info_json["data"]["channels"]
+            .as_array()
+            .is_some_and(|channels| channels.iter().all(|v| {
+                v.as_str()
+                    .is_some_and(|url| url.starts_with("https://conda.anaconda.org/"))
+            }))
+    );
+    assert!(info_json["data"]["libmamba version"].is_string());
+    assert!(info_json["data"]["mamba version"].is_string());
+    assert!(info_json["data"]["curl version"].is_string());
+    assert!(info_json["data"]["libarchive version"].is_string());
 
     let mut config_list = Command::cargo_bin("viper").expect("binary exists");
     let output = config_list
@@ -344,6 +362,87 @@ fn config_set_get_and_info() {
     assert_eq!(list_json["success"], true);
     assert!(list_json["data"]["target_prefix"].is_null());
     assert_eq!(list_json["data"]["json"], true);
+}
+
+#[test]
+fn info_environment_status_reports_active_not_env_and_not_found() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let root_prefix = tmp.path().join("root");
+    let named_prefix = root_prefix.join("envs").join("demo");
+    fs::create_dir_all(named_prefix.join("conda-meta")).expect("create managed env");
+    let not_env_prefix = tmp.path().join("plain-dir");
+    fs::create_dir_all(&not_env_prefix).expect("create plain dir");
+    let missing_prefix = tmp.path().join("missing-env");
+
+    let mut active = Command::cargo_bin("viper").expect("binary exists");
+    let output = active
+        .env("HOME", tmp_home.path())
+        .env("CONDA_PREFIX", &named_prefix)
+        .args([
+            "--no-rc",
+            "--root-prefix",
+            root_prefix.to_str().expect("utf8"),
+            "--prefix",
+            named_prefix.to_str().expect("utf8"),
+            "info",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["data"]["environment"], "demo (active)");
+
+    let mut not_env = Command::cargo_bin("viper").expect("binary exists");
+    let output = not_env
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--root-prefix",
+            root_prefix.to_str().expect("utf8"),
+            "--prefix",
+            not_env_prefix.to_str().expect("utf8"),
+            "info",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["data"]["environment"]
+            .as_str()
+            .is_some_and(|name| name.contains("(not env)"))
+    );
+
+    let mut missing = Command::cargo_bin("viper").expect("binary exists");
+    let output = missing
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--root-prefix",
+            root_prefix.to_str().expect("utf8"),
+            "--prefix",
+            missing_prefix.to_str().expect("utf8"),
+            "info",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["data"]["environment"]
+            .as_str()
+            .is_some_and(|name| name.contains("(not found)"))
+    );
 }
 
 #[test]
@@ -625,6 +724,53 @@ fn list_revisions_warns_that_other_modes_are_ignored() {
                 .as_str()
                 .is_some_and(|msg| msg.contains("--export ignored because --revisions"))))
     );
+}
+
+#[test]
+fn list_plain_output_shows_ignored_mode_warnings() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--explicit",
+            "--canonical",
+            "--export",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(stdout.contains("warning: Option --canonical ignored because --explicit"));
+    assert!(stdout.contains("warning: Option --export ignored because --explicit"));
 }
 
 #[test]

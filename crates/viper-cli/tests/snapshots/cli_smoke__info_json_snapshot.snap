@@ -1,6 +1,6 @@
 ---
 source: crates/viper-cli/tests/cli_smoke.rs
-assertion_line: 376
+assertion_line: 475
 expression: body
 ---
 {
@@ -10,8 +10,10 @@ expression: body
     "base_environment": "<base_environment>",
     "channel_priority": "flexible",
     "channels": [
-      "conda-forge"
+      "https://conda.anaconda.org/conda-forge/linux-64",
+      "https://conda.anaconda.org/conda-forge/noarch"
     ],
+    "curl version": "unknown",
     "env location": "<env_location>",
     "env_exists": false,
     "environment": "<environment>",
@@ -22,7 +24,10 @@ expression: body
       "<envs_dir>"
     ],
     "json": true,
+    "libarchive version": "unknown",
+    "libmamba version": "0.1.0",
     "local_repodata_ttl": 1,
+    "mamba version": "0.1.0",
     "offline": false,
     "package cache": [
       "<package_cache>"
@@ -30,7 +35,7 @@ expression: body
     "package_cache": [
       "<package_cache>"
     ],
-    "platform": "linux",
+    "platform": "linux-64",
     "populated config files": [
       "<config_file>"
     ],

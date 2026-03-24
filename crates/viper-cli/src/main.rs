@@ -223,6 +223,9 @@ fn print_result(result: &OperationResult, as_json: bool) -> Result<()> {
         return Ok(());
     }
 
+    for warning in &result.warnings {
+        println!("warning: {warning}");
+    }
     println!("{}", result.message);
     if result.data != serde_json::Value::Null {
         println!("{}", to_string_pretty(&result.data)?);
