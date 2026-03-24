@@ -1221,18 +1221,35 @@ fn info_environment_status(
 fn expanded_channel_urls(channels: &[String], platform: &str) -> Vec<String> {
     let mut urls = Vec::new();
     for channel in channels {
-        let base = if channel.starts_with("http://") || channel.starts_with("https://") {
-            channel.trim_end_matches('/').to_string()
-        } else {
-            format!(
-                "https://conda.anaconda.org/{}",
-                channel.trim_end_matches('/')
-            )
-        };
-        urls.push(format!("{base}/{platform}"));
-        urls.push(format!("{base}/noarch"));
+        let base = normalize_channel_base_url(channel);
+        for suffix in [platform, "noarch"] {
+            let url = format!("{base}/{suffix}");
+            if !urls.iter().any(|existing| existing == &url) {
+                urls.push(url);
+            }
+        }
     }
     urls
+}
+
+fn normalize_channel_base_url(channel: &str) -> String {
+    let trimmed = channel
+        .trim_end_matches('/')
+        .trim_end_matches("/repodata.json")
+        .trim_end_matches("/current_repodata.json");
+    let normalized = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://conda.anaconda.org/{trimmed}")
+    };
+    let Some((prefix, suffix)) = normalized.rsplit_once('/') else {
+        return normalized;
+    };
+    if is_known_conda_subdir(suffix) {
+        prefix.to_string()
+    } else {
+        normalized
+    }
 }
 
 fn requested_names(specs: &[String]) -> HashSet<String> {
@@ -1387,6 +1404,27 @@ mod tests {
         assert_eq!(
             format_channel_name("https://repo.example.com/custom/channel"),
             "repo.example.com/custom/channel"
+        );
+    }
+
+    #[test]
+    fn expanded_channel_urls_normalize_existing_subdir_channels() {
+        let urls = expanded_channel_urls(
+            &[
+                "conda-forge".to_string(),
+                "https://conda.anaconda.org/conda-forge/linux-64".to_string(),
+                "https://repo.example.com/team/conda/noarch".to_string(),
+            ],
+            "linux-64",
+        );
+        assert_eq!(
+            urls,
+            vec![
+                "https://conda.anaconda.org/conda-forge/linux-64".to_string(),
+                "https://conda.anaconda.org/conda-forge/noarch".to_string(),
+                "https://repo.example.com/team/conda/linux-64".to_string(),
+                "https://repo.example.com/team/conda/noarch".to_string(),
+            ]
         );
     }
 }
