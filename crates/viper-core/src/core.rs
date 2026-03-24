@@ -980,7 +980,6 @@ fn current_virtual_packages() -> Vec<String> {
         "linux" => {
             packages.push("__unix=0=0".to_string());
             packages.push("__linux=0=0".to_string());
-            packages.push("__glibc=2.17=0".to_string());
         }
         "macos" => {
             packages.push("__unix=0=0".to_string());
@@ -1168,6 +1167,9 @@ fn package_channel(pkg: &PackageRecord) -> String {
 fn format_channel_name(channel: &str) -> String {
     let trimmed = channel.trim_end_matches('/');
     let without_repodata = strip_repodata_suffix(trimmed);
+    if without_repodata.starts_with("file://") {
+        return strip_known_subdir_suffix(without_repodata);
+    }
     let without_scheme = without_repodata
         .strip_prefix("https://")
         .or_else(|| without_repodata.strip_prefix("http://"))
@@ -1279,6 +1281,7 @@ fn normalize_channel_base_urls(channel: &str, platform: &str) -> Vec<String> {
         let mut defaults = vec![
             "https://repo.anaconda.com/pkgs/main".to_string(),
             "https://repo.anaconda.com/pkgs/r".to_string(),
+            "https://repo.anaconda.com/pkgs/pro".to_string(),
         ];
         if platform.starts_with("win-") {
             defaults.push("https://repo.anaconda.com/pkgs/msys2".to_string());
@@ -1457,6 +1460,10 @@ mod tests {
             "conda-forge"
         );
         assert_eq!(
+            format_channel_name("file:///tmp/local-channel/linux-64"),
+            "file:///tmp/local-channel"
+        );
+        assert_eq!(
             format_channel_name("https://repo.anaconda.com/pkgs/main/linux-64"),
             "pkgs/main"
         );
@@ -1494,6 +1501,8 @@ mod tests {
                 "https://repo.anaconda.com/pkgs/main/noarch".to_string(),
                 "https://repo.anaconda.com/pkgs/r/linux-64".to_string(),
                 "https://repo.anaconda.com/pkgs/r/noarch".to_string(),
+                "https://repo.anaconda.com/pkgs/pro/linux-64".to_string(),
+                "https://repo.anaconda.com/pkgs/pro/noarch".to_string(),
                 "https://repo.example.com/team/conda/linux-64".to_string(),
                 "https://repo.example.com/team/conda/noarch".to_string(),
             ]
