@@ -947,14 +947,22 @@ fn dedup_channels<'a>(channels: impl Iterator<Item = &'a String>) -> Vec<String>
 }
 
 fn current_platform_subdir() -> String {
-    let arch = std::env::consts::ARCH;
-    let os = std::env::consts::OS;
+    platform_subdir(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn platform_subdir(os: &str, arch: &str) -> String {
     match (os, arch) {
         ("linux", "x86_64") => "linux-64".to_string(),
+        ("linux", "x86") | ("linux", "i686") => "linux-32".to_string(),
         ("linux", "aarch64") => "linux-aarch64".to_string(),
+        ("linux", "arm") | ("linux", "armv7") | ("linux", "armv7l") => "linux-armv7l".to_string(),
+        ("linux", "armv6") | ("linux", "armv6l") => "linux-armv6l".to_string(),
+        ("linux", "riscv64") => "linux-riscv64".to_string(),
         ("macos", "x86_64") => "osx-64".to_string(),
         ("macos", "aarch64") => "osx-arm64".to_string(),
         ("windows", "x86_64") => "win-64".to_string(),
+        ("windows", "aarch64") => "win-arm64".to_string(),
+        ("windows", "x86") | ("windows", "i686") => "win-32".to_string(),
         _ => format!("{os}-{arch}"),
     }
 }
@@ -1154,9 +1162,13 @@ fn is_known_conda_subdir(value: &str) -> bool {
     matches!(
         value,
         "noarch"
+            | "linux-32"
             | "linux-64"
+            | "linux-armv6l"
+            | "linux-armv7l"
             | "linux-aarch64"
             | "linux-ppc64le"
+            | "linux-riscv64"
             | "linux-s390x"
             | "osx-64"
             | "osx-arm64"
@@ -1458,5 +1470,11 @@ mod tests {
                 "https://repo.example.com/team/conda/noarch".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn platform_subdir_maps_windows_arm64_and_known_conda_subdirs() {
+        assert_eq!(platform_subdir("windows", "aarch64"), "win-arm64");
+        assert!(is_known_conda_subdir("linux-riscv64"));
     }
 }
