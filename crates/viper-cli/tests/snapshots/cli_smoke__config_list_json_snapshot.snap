@@ -1,5 +1,6 @@
 ---
 source: crates/viper-cli/tests/cli_smoke.rs
+assertion_line: 395
 expression: body
 ---
 {
@@ -9,15 +10,9 @@ expression: body
     "channels": [
       "conda-forge"
     ],
-    "envs_dirs": [
-      "<envs_dir>"
-    ],
     "json": true,
     "local_repodata_ttl": 1,
     "offline": false,
-    "package_cache": [
-      "<package_cache>"
-    ],
     "rc_path": "<rc_path>",
     "root_prefix": "<root_prefix>",
     "target_prefix": null

@@ -1,31 +1,48 @@
 ---
 source: crates/viper-cli/tests/cli_smoke.rs
+assertion_line: 376
 expression: body
 ---
 {
   "data": {
     "arch": "x86_64",
+    "base environment": "<base_environment>",
     "base_environment": "<base_environment>",
     "channel_priority": "flexible",
     "channels": [
       "conda-forge"
     ],
+    "env location": "<env_location>",
     "env_exists": false,
+    "environment": "<environment>",
+    "envs directories": [
+      "<envs_dir>"
+    ],
     "envs_dirs": [
       "<envs_dir>"
     ],
     "json": true,
     "local_repodata_ttl": 1,
     "offline": false,
+    "package cache": [
+      "<package_cache>"
+    ],
     "package_cache": [
       "<package_cache>"
     ],
     "platform": "linux",
+    "populated config files": [
+      "<config_file>"
+    ],
     "root_prefix": "<root_prefix>",
     "target_prefix": null,
+    "user config files": [
+      "<config_file>"
+    ],
     "user_config_files": [
       "<config_file>"
-    ]
+    ],
+    "virtual packages": []
   },
   "message": "environment info",
   "success": true,

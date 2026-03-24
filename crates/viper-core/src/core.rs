@@ -460,31 +460,58 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 ));
             }
 
-            let payload = if list_options.revisions {
+            let (payload, warnings) = if list_options.revisions {
+                let mut warnings = Vec::new();
+                if list_options.explicit {
+                    warnings.push(
+                        "Option --explicit ignored because --revisions was also provided."
+                            .to_string(),
+                    );
+                }
+                if list_options.canonical {
+                    warnings.push(
+                        "Option --canonical ignored because --revisions was also provided."
+                            .to_string(),
+                    );
+                }
+                if list_options.export {
+                    warnings.push(
+                        "Option --export ignored because --revisions was also provided."
+                            .to_string(),
+                    );
+                }
                 let revisions = EnvironmentState::revisions(&target_prefix)?;
-                json!({
-                    "target_prefix": target_prefix,
-                    "revisions": revisions,
-                    "revisions_supported": true,
-                })
+                (
+                    json!({
+                        "target_prefix": target_prefix,
+                        "revisions": revisions,
+                        "revisions_supported": true,
+                    }),
+                    warnings,
+                )
             } else {
                 let state = EnvironmentState::load(&target_prefix)?;
-                let package_views = render_list_output(state.packages, &list_options)?;
-                json!({
-                    "target_prefix": target_prefix,
-                    "packages": package_views,
-                    "applied": {
-                        "regex": list_options.regex,
-                        "full_name": list_options.full_name,
-                        "no_pip": list_options.no_pip,
-                        "reverse": list_options.reverse,
-                        "explicit": list_options.explicit,
-                        "canonical": list_options.canonical,
-                        "export": list_options.export,
-                    },
-                })
+                let rendered = render_list_output(state.packages, &list_options)?;
+                (
+                    json!({
+                        "target_prefix": target_prefix,
+                        "packages": rendered.payload,
+                        "applied": {
+                            "regex": list_options.regex,
+                            "full_name": list_options.full_name,
+                            "no_pip": list_options.no_pip,
+                            "reverse": list_options.reverse,
+                            "explicit": list_options.explicit,
+                            "canonical": list_options.canonical,
+                            "export": list_options.export,
+                        },
+                    }),
+                    rendered.warnings,
+                )
             };
-            Ok(OperationResult::ok("packages listed", payload))
+            let mut result = OperationResult::ok("packages listed", payload);
+            result.warnings = warnings;
+            Ok(result)
         }
         CliOperation::Info => {
             let env_exists = config
@@ -492,6 +519,19 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 .as_ref()
                 .map(|p| p.exists())
                 .unwrap_or(false);
+            let env_location = config
+                .target_prefix
+                .clone()
+                .unwrap_or_else(|| config.root_prefix.clone());
+            let env_name = if env_location == config.root_prefix {
+                "base".to_string()
+            } else {
+                env_location
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| env_location.display().to_string())
+            };
             Ok(OperationResult::ok(
                 "environment info",
                 json!({
@@ -503,10 +543,18 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     "local_repodata_ttl": config.local_repodata_ttl,
                     "json": config.json,
                     "env_exists": env_exists,
+                    "environment": env_name,
+                    "env location": env_location,
                     "envs_dirs": [config.root_prefix.join("envs")],
+                    "envs directories": [config.root_prefix.join("envs")],
                     "package_cache": [config.root_prefix.join("pkgs")],
+                    "package cache": [config.root_prefix.join("pkgs")],
                     "user_config_files": [store.path()],
+                    "user config files": [store.path()],
+                    "populated config files": [store.path()],
+                    "virtual packages": [],
                     "base_environment": config.root_prefix,
+                    "base environment": config.root_prefix,
                     "platform": std::env::consts::OS,
                     "arch": std::env::consts::ARCH,
                 }),
@@ -932,10 +980,16 @@ fn solve_with_production_entry(
     solve_with_production_solver(specs, repodata, options).map_err(CoreError::UnsatisfiedSpecs)
 }
 
+struct RenderedListOutput {
+    payload: serde_json::Value,
+    warnings: Vec<String>,
+}
+
 fn render_list_output(
     mut packages: Vec<PackageRecord>,
     options: &ListOptions,
-) -> Result<serde_json::Value, CoreError> {
+) -> Result<RenderedListOutput, CoreError> {
+    let mut warnings = Vec::new();
     if options.explicit && options.md5 && options.sha256 {
         return Err(CoreError::InvalidListOptions(
             "only one of --md5 and --sha256 can be specified".to_string(),
@@ -955,6 +1009,15 @@ fn render_list_output(
     }
 
     if options.explicit {
+        if options.canonical {
+            warnings.push(
+                "Option --canonical ignored because --explicit was also provided.".to_string(),
+            );
+        }
+        if options.export {
+            warnings
+                .push("Option --export ignored because --explicit was also provided.".to_string());
+        }
         let lines = packages
             .iter()
             .map(|pkg| {
@@ -973,23 +1036,34 @@ fn render_list_output(
                 line
             })
             .collect::<Vec<_>>();
-        return Ok(json!(lines));
+        return Ok(RenderedListOutput {
+            payload: json!(lines),
+            warnings,
+        });
     }
 
     if options.canonical {
+        if options.export {
+            warnings
+                .push("Option --export ignored because --canonical was also provided.".to_string());
+        }
         let rows = packages
             .iter()
             .map(|pkg| {
                 format!(
-                    "{}::{}-{}-{}",
+                    "{}/{}::{}-{}-{}",
                     package_channel(pkg),
+                    pkg.platform,
                     pkg.name,
                     package_version(pkg),
                     package_build_string(pkg)
                 )
             })
             .collect::<Vec<_>>();
-        return Ok(json!(rows));
+        return Ok(RenderedListOutput {
+            payload: json!(rows),
+            warnings,
+        });
     }
 
     if options.export {
@@ -1004,7 +1078,10 @@ fn render_list_output(
                 )
             })
             .collect::<Vec<_>>();
-        return Ok(json!(rows));
+        return Ok(RenderedListOutput {
+            payload: json!(rows),
+            warnings,
+        });
     }
 
     let rows = packages
@@ -1029,7 +1106,10 @@ fn render_list_output(
             })
         })
         .collect::<Vec<_>>();
-    Ok(json!(rows))
+    Ok(RenderedListOutput {
+        payload: json!(rows),
+        warnings,
+    })
 }
 
 fn package_name_matches(name: &str, pattern: &str, full_name: bool) -> bool {
@@ -1050,7 +1130,23 @@ fn package_build_string(pkg: &PackageRecord) -> String {
 }
 
 fn package_channel(pkg: &PackageRecord) -> String {
-    pkg.channel.clone()
+    format_channel_name(&pkg.channel)
+}
+
+fn format_channel_name(channel: &str) -> String {
+    let trimmed = channel.trim_end_matches('/');
+    if let Some(rest) = trimmed.strip_prefix("https://conda.anaconda.org/") {
+        return rest.to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("http://conda.anaconda.org/") {
+        return rest.to_string();
+    }
+    trimmed
+        .rsplit('/')
+        .next()
+        .filter(|seg| !seg.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| trimmed.to_string())
 }
 
 fn package_base_url(pkg: &PackageRecord) -> String {

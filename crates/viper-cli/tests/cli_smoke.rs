@@ -319,9 +319,17 @@ fn config_set_get_and_info() {
     assert_eq!(info_json["success"], true);
     assert!(info_json["data"]["platform"].is_string());
     assert!(info_json["data"]["envs_dirs"].is_array());
+    assert!(info_json["data"]["envs directories"].is_array());
     assert!(info_json["data"]["package_cache"].is_array());
+    assert!(info_json["data"]["package cache"].is_array());
     assert!(info_json["data"]["user_config_files"].is_array());
+    assert!(info_json["data"]["user config files"].is_array());
+    assert!(info_json["data"]["populated config files"].is_array());
+    assert!(info_json["data"]["virtual packages"].is_array());
+    assert!(info_json["data"]["environment"].is_string());
+    assert!(info_json["data"]["env location"].is_string());
     assert!(info_json["data"]["base_environment"].is_string());
+    assert!(info_json["data"]["base environment"].is_string());
 
     let mut config_list = Command::cargo_bin("viper").expect("binary exists");
     let output = config_list
@@ -353,9 +361,17 @@ fn info_json_snapshot_is_stable() {
     let mut body: Value = serde_json::from_slice(&output).expect("valid json");
     body["data"]["root_prefix"] = serde_json::json!("<root_prefix>");
     body["data"]["package_cache"] = serde_json::json!(["<package_cache>"]);
+    body["data"]["package cache"] = serde_json::json!(["<package_cache>"]);
     body["data"]["envs_dirs"] = serde_json::json!(["<envs_dir>"]);
+    body["data"]["envs directories"] = serde_json::json!(["<envs_dir>"]);
     body["data"]["user_config_files"] = serde_json::json!(["<config_file>"]);
+    body["data"]["user config files"] = serde_json::json!(["<config_file>"]);
+    body["data"]["populated config files"] = serde_json::json!(["<config_file>"]);
+    body["data"]["environment"] = serde_json::json!("<environment>");
+    body["data"]["env location"] = serde_json::json!("<env_location>");
+    body["data"]["virtual packages"] = serde_json::json!([]);
     body["data"]["base_environment"] = serde_json::json!("<base_environment>");
+    body["data"]["base environment"] = serde_json::json!("<base_environment>");
     body["data"]["target_prefix"] = serde_json::json!(null);
     assert_json_snapshot!("info_json_snapshot", body);
 }
@@ -374,8 +390,6 @@ fn config_list_json_snapshot_is_stable() {
         .clone();
     let mut body: Value = serde_json::from_slice(&output).expect("valid json");
     body["data"]["root_prefix"] = serde_json::json!("<root_prefix>");
-    body["data"]["package_cache"] = serde_json::json!(["<package_cache>"]);
-    body["data"]["envs_dirs"] = serde_json::json!(["<envs_dir>"]);
     body["data"]["target_prefix"] = serde_json::json!(null);
     body["data"]["rc_path"] = serde_json::json!("<rc_path>");
     assert_json_snapshot!("config_list_json_snapshot", body);
@@ -460,6 +474,11 @@ dependencies:
     let body: Value = serde_json::from_slice(&output).expect("valid json");
     let packages = body["data"]["packages"].as_array().expect("packages array");
     assert!(packages.iter().all(|pkg| pkg["source"] != "pip"));
+    assert!(packages.iter().all(|pkg| {
+        pkg["channel"]
+            .as_str()
+            .is_some_and(|c| !c.starts_with("http"))
+    }));
 
     let mut canonical = Command::cargo_bin("viper").expect("binary exists");
     let output = canonical
@@ -478,10 +497,133 @@ dependencies:
         .clone();
     let body: Value = serde_json::from_slice(&output).expect("valid json");
     let canonical_rows = body["data"]["packages"].as_array().expect("canonical rows");
+    assert!(canonical_rows.iter().all(|row| {
+        row.as_str()
+            .is_some_and(|s| s.contains("::") && s.contains("/linux-64::"))
+    }));
+
+    let mut export = Command::cargo_bin("viper").expect("binary exists");
+    let output = export
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--export",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let export_rows = body["data"]["packages"].as_array().expect("export rows");
     assert!(
-        canonical_rows
+        export_rows
             .iter()
-            .all(|row| row.as_str().is_some_and(|s| s.contains("::")))
+            .all(|row| row.as_str().is_some_and(|s| s.contains('=')))
+    );
+
+    let mut explicit_wins = Command::cargo_bin("viper").expect("binary exists");
+    let output = explicit_wins
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--explicit",
+            "--canonical",
+            "--export",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|msg| msg.contains("--canonical ignored because --explicit"))))
+    );
+    assert!(
+        body["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|msg| msg.contains("--export ignored because --explicit"))))
+    );
+}
+
+#[test]
+fn list_revisions_warns_that_other_modes_are_ignored() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--revisions",
+            "--explicit",
+            "--canonical",
+            "--export",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        body["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|msg| msg.contains("--explicit ignored because --revisions"))))
+    );
+    assert!(
+        body["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|msg| msg.contains("--canonical ignored because --revisions"))))
+    );
+    assert!(
+        body["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|msg| msg.contains("--export ignored because --revisions"))))
     );
 }
 

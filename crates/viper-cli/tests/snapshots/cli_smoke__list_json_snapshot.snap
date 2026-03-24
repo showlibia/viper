@@ -1,5 +1,6 @@
 ---
 source: crates/viper-cli/tests/cli_smoke.rs
+assertion_line: 680
 expression: body
 ---
 {
@@ -18,7 +19,7 @@ expression: body
         "base_url": "https://conda.anaconda.org/conda-forge",
         "build_number": 0,
         "build_string": "0",
-        "channel": "https://conda.anaconda.org/conda-forge",
+        "channel": "conda-forge",
         "depends": [],
         "dist_name": "pip-24.0-0",
         "installed_at": "<installed_at>",
@@ -35,7 +36,7 @@ expression: body
         "base_url": "https://conda.anaconda.org/conda-forge",
         "build_number": 0,
         "build_string": "0",
-        "channel": "https://conda.anaconda.org/conda-forge",
+        "channel": "conda-forge",
         "depends": [],
         "dist_name": "python-3.12.0-0",
         "installed_at": "<installed_at>",
