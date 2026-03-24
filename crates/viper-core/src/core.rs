@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::process::Command;
 
 use regex::Regex;
 use serde_json::json;
@@ -979,19 +980,67 @@ fn current_virtual_packages() -> Vec<String> {
     match os {
         "linux" => {
             packages.push("__unix=0=0".to_string());
-            packages.push("__linux=0=0".to_string());
+            if let Some(version) = probe_linux_kernel_version() {
+                packages.push(format!("__linux={version}=0"));
+            }
+            if let Some(version) = probe_glibc_version() {
+                packages.push(format!("__glibc={version}=0"));
+            }
         }
         "macos" => {
             packages.push("__unix=0=0".to_string());
-            packages.push("__osx=0=0".to_string());
+            if let Some(version) = probe_macos_version() {
+                packages.push(format!("__osx={version}=0"));
+            }
         }
         "windows" => {
-            packages.push("__win=0=0".to_string());
+            if let Some(version) = probe_windows_version() {
+                packages.push(format!("__win={version}=0"));
+            } else {
+                packages.push("__win=0=0".to_string());
+            }
         }
         _ => {}
     }
     packages.push(format!("__archspec=1={arch}"));
     packages
+}
+
+fn probe_linux_kernel_version() -> Option<String> {
+    probe_command_output("uname", &["-r"])
+        .map(|release| release.split('-').next().unwrap_or(&release).to_string())
+}
+
+fn probe_glibc_version() -> Option<String> {
+    let output = probe_command_output("getconf", &["GNU_LIBC_VERSION"])?;
+    output.split_whitespace().last().map(ToOwned::to_owned)
+}
+
+fn probe_macos_version() -> Option<String> {
+    probe_command_output("sw_vers", &["-productVersion"])
+}
+
+fn probe_windows_version() -> Option<String> {
+    let output = probe_command_output("cmd", &["/C", "ver"])?;
+    let version = output
+        .split_whitespace()
+        .find(|token| token.starts_with('[') && token.ends_with(']'))
+        .map(|token| token.trim_matches(&['[', ']'][..]).to_string())?;
+    Some(version)
+}
+
+fn probe_command_output(command: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(command).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn select_repodata_source(specs: &[String]) -> RepodataSource {
@@ -1233,14 +1282,20 @@ fn info_environment_status(
     let Some(target) = target_prefix else {
         return ("None".to_string(), "-".to_string());
     };
+    let envs_dir = root_prefix.join("envs");
     let mut name = if target == root_prefix {
         "base".to_string()
-    } else {
+    } else if target
+        .parent()
+        .is_some_and(|parent| parent == envs_dir.as_path())
+    {
         target
             .file_name()
             .and_then(|name| name.to_str())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| target.display().to_string())
+    } else {
+        target.display().to_string()
     };
     let target_display = target.display().to_string();
     if std::env::var_os("CONDA_PREFIX")

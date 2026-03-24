@@ -339,6 +339,16 @@ fn config_set_get_and_info() {
             .as_array()
             .is_some_and(|entries| !entries.is_empty() && entries.iter().all(|v| v.is_string()))
     );
+    if std::env::consts::OS == "linux" {
+        assert!(
+            info_json["data"]["virtual packages"]
+                .as_array()
+                .is_some_and(|entries| entries.iter().any(|v| {
+                    v.as_str()
+                        .is_some_and(|entry| entry.starts_with("__linux="))
+                }))
+        );
+    }
     assert!(info_json["data"]["environment"].is_string());
     assert!(info_json["data"]["env location"].is_string());
     assert!(info_json["data"]["base_environment"].is_string());
@@ -444,10 +454,9 @@ fn info_environment_status_reports_active_not_env_and_not_found() {
         .stdout
         .clone();
     let body: Value = serde_json::from_slice(&output).expect("valid json");
-    assert!(
-        body["data"]["environment"]
-            .as_str()
-            .is_some_and(|name| name.contains("(not env)"))
+    assert_eq!(
+        body["data"]["environment"],
+        format!("{} (not env)", not_env_prefix.display())
     );
     assert_eq!(
         body["data"]["env location"],
