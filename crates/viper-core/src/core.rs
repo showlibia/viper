@@ -975,26 +975,45 @@ fn platform_subdir(os: &str, arch: &str) -> String {
 
 fn current_virtual_packages() -> Vec<String> {
     let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
+    let arch = std::env::var("CONDA_OVERRIDE_ARCHSPEC")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string());
     let mut packages = Vec::new();
     match os {
         "linux" => {
             packages.push("__unix=0=0".to_string());
-            if let Some(version) = probe_linux_kernel_version() {
+            if let Some(version) = std::env::var("CONDA_OVERRIDE_LINUX")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(probe_linux_kernel_version)
+            {
                 packages.push(format!("__linux={version}=0"));
             }
-            if let Some(version) = probe_glibc_version() {
+            if let Some(version) = std::env::var("CONDA_OVERRIDE_GLIBC")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(probe_glibc_version)
+            {
                 packages.push(format!("__glibc={version}=0"));
             }
         }
         "macos" => {
             packages.push("__unix=0=0".to_string());
-            if let Some(version) = probe_macos_version() {
+            if let Some(version) = std::env::var("CONDA_OVERRIDE_OSX")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(probe_macos_version)
+            {
                 packages.push(format!("__osx={version}=0"));
             }
         }
         "windows" => {
-            if let Some(version) = probe_windows_version() {
+            if let Some(version) = std::env::var("CONDA_OVERRIDE_WIN")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(probe_windows_version)
+            {
                 packages.push(format!("__win={version}=0"));
             } else {
                 packages.push("__win=0=0".to_string());
@@ -1022,11 +1041,7 @@ fn probe_macos_version() -> Option<String> {
 
 fn probe_windows_version() -> Option<String> {
     let output = probe_command_output("cmd", &["/C", "ver"])?;
-    let version = output
-        .split_whitespace()
-        .find(|token| token.starts_with('[') && token.ends_with(']'))
-        .map(|token| token.trim_matches(&['[', ']'][..]).to_string())?;
-    Some(version)
+    parse_windows_version_from_ver_output(&output)
 }
 
 fn probe_command_output(command: &str, args: &[&str]) -> Option<String> {
@@ -1040,6 +1055,19 @@ fn probe_command_output(command: &str, args: &[&str]) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn parse_windows_version_from_ver_output(output: &str) -> Option<String> {
+    let marker = "Version ";
+    let start = output.find(marker)? + marker.len();
+    let rest = &output[start..];
+    let end = rest.find(']').unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
     }
 }
 
@@ -1218,6 +1246,17 @@ fn format_channel_name(channel: &str) -> String {
     let without_repodata = strip_repodata_suffix(trimmed);
     if without_repodata.starts_with("file://") {
         return strip_known_subdir_suffix(without_repodata);
+    }
+    if without_repodata.starts_with("https://") || without_repodata.starts_with("http://") {
+        let without_scheme = without_repodata
+            .strip_prefix("https://")
+            .or_else(|| without_repodata.strip_prefix("http://"))
+            .unwrap_or(without_repodata);
+        if !without_scheme.starts_with("conda.anaconda.org/")
+            && !without_scheme.starts_with("repo.anaconda.com/")
+        {
+            return strip_known_subdir_suffix(without_repodata);
+        }
     }
     let without_scheme = without_repodata
         .strip_prefix("https://")
@@ -1524,15 +1563,15 @@ mod tests {
         );
         assert_eq!(
             format_channel_name("https://repo.example.com/team/conda/linux-64"),
-            "repo.example.com/team/conda"
+            "https://repo.example.com/team/conda"
         );
         assert_eq!(
             format_channel_name("https://repo.example.com/pkgs/main/noarch"),
-            "repo.example.com/pkgs/main"
+            "https://repo.example.com/pkgs/main"
         );
         assert_eq!(
             format_channel_name("https://repo.example.com/custom/channel"),
-            "repo.example.com/custom/channel"
+            "https://repo.example.com/custom/channel"
         );
     }
 
@@ -1569,5 +1608,13 @@ mod tests {
         assert_eq!(platform_subdir("windows", "aarch64"), "win-arm64");
         assert_eq!(platform_subdir("linux", "arm"), "linux-arm");
         assert!(is_known_conda_subdir("linux-riscv64"));
+    }
+
+    #[test]
+    fn parse_windows_version_from_ver_output_extracts_version() {
+        assert_eq!(
+            parse_windows_version_from_ver_output("Microsoft Windows [Version 10.0.22621.3007]"),
+            Some("10.0.22621.3007".to_string())
+        );
     }
 }
