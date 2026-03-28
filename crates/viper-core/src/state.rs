@@ -67,7 +67,7 @@ impl EnvironmentState {
     ) -> Result<Self, CoreError> {
         let mut state = Self::load(prefix)?;
         if include_pip_site_packages {
-            state.merge_pip_site_packages(prefix);
+            state.merge_pip_site_packages(prefix)?;
         }
         Ok(state)
     }
@@ -557,12 +557,15 @@ impl EnvironmentState {
 struct PipInspectReport {
     #[serde(default)]
     installed: Vec<PipInspectItem>,
+    #[serde(default)]
+    environment: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
 struct PipInspectItem {
     #[serde(default)]
     metadata: PipInspectMetadata,
+    installer: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -571,15 +574,31 @@ struct PipInspectMetadata {
     version: Option<String>,
 }
 
+#[derive(Debug)]
+struct DiscoveredPipPackage {
+    name: String,
+    version: String,
+    platform: String,
+}
+
 impl EnvironmentState {
-    fn merge_pip_site_packages(&mut self, prefix: &Path) {
-        for (name, version) in discover_pip_site_packages(prefix) {
+    fn merge_pip_site_packages(&mut self, prefix: &Path) -> Result<(), CoreError> {
+        if !self
+            .packages
+            .iter()
+            .any(|pkg| pkg.source == "conda" && pkg.name == "pip")
+        {
+            return Ok(());
+        }
+
+        for pkg in discover_pip_site_packages(prefix)? {
+            let name = pkg.name;
             if self.packages.iter().any(|pkg| pkg.name == name) {
                 continue;
             }
             self.packages.push(PackageRecord {
                 name: name.clone(),
-                version: version.clone(),
+                version: pkg.version.clone(),
                 build_string: "pypi_0".to_string(),
                 channel: "pypi".to_string(),
                 base_url: "https://pypi.org".to_string(),
@@ -587,41 +606,84 @@ impl EnvironmentState {
                 md5: None,
                 sha256: None,
                 build_number: 0,
-                dist_name: format!("{name}-{version}"),
-                spec: format!("{name}=={version}"),
+                dist_name: format!("{}-{}", name, pkg.version),
+                spec: format!("{}=={}", name, pkg.version),
                 source: "pip".to_string(),
                 depends: Vec::new(),
                 installed_at: Utc::now().to_rfc3339(),
-                platform: String::new(),
+                platform: pkg.platform.clone(),
             });
         }
         self.packages.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(())
     }
 }
 
-fn discover_pip_site_packages(prefix: &Path) -> Vec<(String, String)> {
+fn discover_pip_site_packages(prefix: &Path) -> Result<Vec<DiscoveredPipPackage>, CoreError> {
     let python = prefix.join("bin").join("python");
     if !python.exists() {
-        return Vec::new();
+        return Err(CoreError::PrefixState(format!(
+            "cannot discover pip site-packages because '{}' is missing",
+            python.display()
+        )));
     }
     let output = match Command::new(&python)
         .args(["-m", "pip", "inspect", "--local"])
         .output()
     {
         Ok(output) => output,
-        Err(_) => return Vec::new(),
+        Err(err) => {
+            return Err(CoreError::PrefixState(format!(
+                "failed to run '{} -m pip inspect --local': {}",
+                python.display(),
+                err
+            )));
+        }
     };
     if !output.status.success() {
-        return Vec::new();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(CoreError::PrefixState(if stderr.is_empty() {
+            format!(
+                "pip inspect exited with status {}",
+                output
+                    .status
+                    .code()
+                    .map_or_else(|| "unknown".to_string(), |code| code.to_string())
+            )
+        } else {
+            format!(
+                "pip inspect exited with status {}: {}",
+                output
+                    .status
+                    .code()
+                    .map_or_else(|| "unknown".to_string(), |code| code.to_string()),
+                stderr
+            )
+        }));
     }
     let report = match serde_json::from_slice::<PipInspectReport>(&output.stdout) {
         Ok(report) => report,
-        Err(_) => return Vec::new(),
+        Err(err) => {
+            return Err(CoreError::PrefixState(format!(
+                "pip inspect returned invalid JSON: {}",
+                err
+            )));
+        }
     };
-    report
+    let platform = inspect_platform(&report.environment).unwrap_or_default();
+    Ok(report
         .installed
         .into_iter()
         .filter_map(|item| {
+            let installer = item
+                .installer
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if installer != "pip" && installer != "uv" {
+                return None;
+            }
             let name = item.metadata.name?.trim().to_string();
             if name.is_empty() {
                 return None;
@@ -634,9 +696,29 @@ fn discover_pip_site_packages(prefix: &Path) -> Vec<(String, String)> {
                 .filter(|v| !v.is_empty())
                 .unwrap_or("unknown")
                 .to_string();
-            Some((name, version))
+            Some(DiscoveredPipPackage {
+                name,
+                version,
+                platform: platform.clone(),
+            })
         })
-        .collect()
+        .collect())
+}
+
+fn inspect_platform(environment: &serde_json::Value) -> Option<String> {
+    environment
+        .get("platform")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            environment
+                .get("default_environment")
+                .and_then(|v| v.get("platform"))
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .map(ToOwned::to_owned)
+        })
 }
 
 fn requested_name_from_history_spec(spec: &str) -> Option<String> {

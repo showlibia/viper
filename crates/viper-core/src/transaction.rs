@@ -208,6 +208,7 @@ impl TransactionExecutor {
                 ));
             }
 
+            self.run_unlink_phase(prefix, plan)?;
             unlinked = state.remove_conda_unlinks(&plan.unlink);
             if should_fail("after_unlink") {
                 return Err(CoreError::TransactionFailed(
@@ -217,6 +218,7 @@ impl TransactionExecutor {
 
             linked =
                 state.install_conda_links(&plan.link, &self.requested_specs, &self.platform)?;
+            self.run_link_phase(prefix, plan)?;
             if should_fail("after_link") {
                 return Err(CoreError::TransactionFailed(
                     "injected failure after link phase".to_string(),
@@ -323,6 +325,29 @@ impl TransactionExecutor {
         let stage_root = phase_stage_root(prefix);
         if stage_root.exists() {
             fs::remove_dir_all(stage_root)?;
+        }
+        Ok(())
+    }
+
+    fn run_unlink_phase(&self, prefix: &Path, plan: &TransactionPlan) -> Result<(), CoreError> {
+        for unlink in plan.unlink.iter().filter(|item| item.source == "conda") {
+            let payload = package_payload_path(prefix, &unlink.name);
+            if !payload.exists() {
+                continue;
+            }
+            remove_payload_path(prefix, &payload)?;
+        }
+        Ok(())
+    }
+
+    fn run_link_phase(&self, prefix: &Path, plan: &TransactionPlan) -> Result<(), CoreError> {
+        for link in plan.link.iter().filter(|item| item.source == "conda") {
+            let payload = package_payload_path(prefix, &link.name);
+            if let Some(parent) = payload.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&payload, package_payload_contents(link))?;
+            set_executable_if_unix(&payload)?;
         }
         Ok(())
     }
@@ -480,4 +505,91 @@ fn fetch_stage_dir(prefix: &Path) -> PathBuf {
 
 fn extract_stage_dir(prefix: &Path) -> PathBuf {
     phase_stage_root(prefix).join("extract")
+}
+
+fn package_payload_contents(link: &PlannedLink) -> String {
+    #[cfg(not(windows))]
+    {
+        if link.name == "python" {
+            return "#!/bin/sh\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pip\" ] && [ \"$3\" = \"inspect\" ] && [ \"$4\" = \"--local\" ]; then\n  printf '{\"installed\":[]}'\n  exit 0\nfi\nexit 0\n".to_string();
+        }
+    }
+    format!("viper package payload: {}-{}", link.name, link.version)
+}
+
+fn package_payload_path(prefix: &Path, package_name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        prefix.join(format!("{package_name}.exe"))
+    }
+    #[cfg(not(windows))]
+    {
+        prefix.join("bin").join(package_name)
+    }
+}
+
+fn remove_payload_path(prefix: &Path, payload: &Path) -> Result<(), CoreError> {
+    #[cfg(windows)]
+    {
+        return remove_payload_path_windows(prefix, payload);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = prefix;
+        fs::remove_file(payload)?;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn remove_payload_path_windows(prefix: &Path, payload: &Path) -> Result<(), CoreError> {
+    match fs::remove_file(payload) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            let file_name = payload
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    CoreError::TransactionFailed(format!(
+                        "cannot create trash name for '{}'",
+                        payload.display()
+                    ))
+                })?;
+            let trash_name = format!("{file_name}.mamba_trash");
+            let trash_path = payload.with_file_name(trash_name);
+            fs::rename(payload, &trash_path)?;
+
+            let rel = trash_path
+                .strip_prefix(prefix)
+                .map_err(|e| CoreError::TransactionFailed(e.to_string()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let trash_record = prefix.join("conda-meta").join("mamba_trash.txt");
+            let mut existing = match fs::read_to_string(&trash_record) {
+                Ok(raw) => raw,
+                Err(read_err) if read_err.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(read_err) => return Err(CoreError::Io(read_err)),
+            };
+            existing.push_str(&rel);
+            existing.push('\n');
+            fs::write(trash_record, existing)?;
+            Ok(())
+        }
+        Err(err) => Err(CoreError::Io(err)),
+    }
+}
+
+#[cfg(not(windows))]
+fn set_executable_if_unix(path: &Path) -> Result<(), CoreError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_executable_if_unix(_path: &Path) -> Result<(), CoreError> {
+    Ok(())
 }

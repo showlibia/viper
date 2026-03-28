@@ -36,6 +36,8 @@ pub enum CoreError {
     PackageNotInstalled(String),
     #[error("transaction failed: {0}")]
     TransactionFailed(String),
+    #[error("prefix state failed: {0}")]
+    PrefixState(String),
     #[error("config key '{0}' is not supported")]
     UnsupportedConfigKey(String),
     #[error("io error: {0}")]

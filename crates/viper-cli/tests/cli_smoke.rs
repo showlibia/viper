@@ -5991,6 +5991,25 @@ fn list_discovers_pip_site_packages_and_no_pip_hides_them() {
 }"#,
     )
     .expect("write python record");
+    fs::write(
+        meta_dir.join("pip-24.0-0.json"),
+        r#"{
+  "name":"pip",
+  "version":"24.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/noarch/pip-24.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"pip-24.0-0",
+  "spec":"pip",
+  "source":"conda",
+  "depends":["python >=3.12,<3.13"],
+  "installed_at":"now",
+  "platform":"noarch"
+}"#,
+    )
+    .expect("write pip record");
     fs::write(meta_dir.join("history"), "").expect("write history");
 
     let bin_dir = prefix.join("bin");
@@ -5998,7 +6017,7 @@ fn list_discovers_pip_site_packages_and_no_pip_hides_them() {
     let python = bin_dir.join("python");
     fs::write(
         &python,
-        "#!/bin/sh\nprintf '{\"installed\":[{\"metadata\":{\"name\":\"rich\",\"version\":\"13.7.1\"}}]}'\n",
+        "#!/bin/sh\nprintf '{\"environment\":{\"platform\":\"linux-64\"},\"installed\":[{\"installer\":\"pip\",\"metadata\":{\"name\":\"rich\",\"version\":\"13.7.1\"}}]}'\n",
     )
     .expect("write fake python");
     let mut perms = fs::metadata(&python).expect("python meta").permissions();
@@ -6028,6 +6047,15 @@ fn list_discovers_pip_site_packages_and_no_pip_hides_them() {
         .collect::<Vec<_>>();
     assert!(names.contains(&"python"));
     assert!(names.contains(&"rich"));
+    let rich_platform = body["data"]["packages"]
+        .as_array()
+        .expect("packages array")
+        .iter()
+        .find(|pkg| pkg["name"].as_str() == Some("rich"))
+        .and_then(|pkg| pkg["platform"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(rich_platform, "linux-64");
 
     let mut list_no_pip = Command::cargo_bin("viper").expect("binary exists");
     let output = list_no_pip
@@ -6053,6 +6081,331 @@ fn list_discovers_pip_site_packages_and_no_pip_hides_them() {
         .collect::<Vec<_>>();
     assert!(names.contains(&"python"));
     assert!(!names.contains(&"rich"));
+}
+
+#[cfg(unix)]
+#[test]
+fn list_ignores_site_packages_when_conda_pip_is_not_installed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("env");
+    let meta_dir = prefix.join("conda-meta");
+    fs::create_dir_all(&meta_dir).expect("create conda-meta");
+    fs::write(
+        meta_dir.join("python-3.12.0-0.json"),
+        r#"{
+  "name":"python",
+  "version":"3.12.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"python-3.12.0-0",
+  "spec":"python",
+  "source":"conda",
+  "depends":[],
+  "installed_at":"now",
+  "platform":"linux-64"
+}"#,
+    )
+    .expect("write python record");
+    fs::write(meta_dir.join("history"), "").expect("write history");
+
+    let bin_dir = prefix.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin");
+    let python = bin_dir.join("python");
+    fs::write(
+        &python,
+        "#!/bin/sh\nprintf '{\"environment\":{\"platform\":\"linux-64\"},\"installed\":[{\"installer\":\"pip\",\"metadata\":{\"name\":\"rich\",\"version\":\"13.7.1\"}}]}'\n",
+    )
+    .expect("write fake python");
+    let mut perms = fs::metadata(&python).expect("python meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&python, perms).expect("chmod python");
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let names = body["data"]["packages"]
+        .as_array()
+        .expect("packages array")
+        .iter()
+        .filter_map(|pkg| pkg["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"python"));
+    assert!(!names.contains(&"rich"));
+}
+
+#[cfg(unix)]
+#[test]
+fn list_ignores_non_pip_installers_from_pip_inspect() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("env");
+    let meta_dir = prefix.join("conda-meta");
+    fs::create_dir_all(&meta_dir).expect("create conda-meta");
+    fs::write(
+        meta_dir.join("pip-24.0-0.json"),
+        r#"{
+  "name":"pip",
+  "version":"24.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/noarch/pip-24.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"pip-24.0-0",
+  "spec":"pip",
+  "source":"conda",
+  "depends":["python >=3.12,<3.13"],
+  "installed_at":"now",
+  "platform":"noarch"
+}"#,
+    )
+    .expect("write pip record");
+    fs::write(meta_dir.join("history"), "").expect("write history");
+
+    let bin_dir = prefix.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin");
+    let python = bin_dir.join("python");
+    fs::write(
+        &python,
+        "#!/bin/sh\nprintf '{\"installed\":[{\"installer\":\"poetry\",\"metadata\":{\"name\":\"poetry-plugin\",\"version\":\"1.0\"}},{\"installer\":\"uv\",\"metadata\":{\"name\":\"uvicorn\",\"version\":\"0.30.0\"}}]}'\n",
+    )
+    .expect("write fake python");
+    let mut perms = fs::metadata(&python).expect("python meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&python, perms).expect("chmod python");
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let names = body["data"]["packages"]
+        .as_array()
+        .expect("packages array")
+        .iter()
+        .filter_map(|pkg| pkg["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(!names.contains(&"poetry-plugin"));
+    assert!(names.contains(&"uvicorn"));
+}
+
+#[cfg(unix)]
+#[test]
+fn list_fails_when_pip_inspect_exits_with_non_zero_status() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("env");
+    let meta_dir = prefix.join("conda-meta");
+    fs::create_dir_all(&meta_dir).expect("create conda-meta");
+    fs::write(
+        meta_dir.join("pip-24.0-0.json"),
+        r#"{
+  "name":"pip",
+  "version":"24.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/noarch/pip-24.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"pip-24.0-0",
+  "spec":"pip",
+  "source":"conda",
+  "depends":["python >=3.12,<3.13"],
+  "installed_at":"now",
+  "platform":"noarch"
+}"#,
+    )
+    .expect("write pip record");
+    fs::write(meta_dir.join("history"), "").expect("write history");
+
+    let bin_dir = prefix.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin");
+    let python = bin_dir.join("python");
+    fs::write(&python, "#!/bin/sh\nexit 1\n").expect("write fake python");
+    let mut perms = fs::metadata(&python).expect("python meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&python, perms).expect("chmod python");
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(err.contains("pip inspect exited with status"));
+}
+
+#[cfg(unix)]
+#[test]
+fn list_fails_when_pip_inspect_returns_invalid_json() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("env");
+    let meta_dir = prefix.join("conda-meta");
+    fs::create_dir_all(&meta_dir).expect("create conda-meta");
+    fs::write(
+        meta_dir.join("pip-24.0-0.json"),
+        r#"{
+  "name":"pip",
+  "version":"24.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/noarch/pip-24.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"pip-24.0-0",
+  "spec":"pip",
+  "source":"conda",
+  "depends":["python >=3.12,<3.13"],
+  "installed_at":"now",
+  "platform":"noarch"
+}"#,
+    )
+    .expect("write pip record");
+    fs::write(meta_dir.join("history"), "").expect("write history");
+
+    let bin_dir = prefix.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin");
+    let python = bin_dir.join("python");
+    fs::write(&python, "#!/bin/sh\nprintf '{not-json}'\n").expect("write fake python");
+    let mut perms = fs::metadata(&python).expect("python meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&python, perms).expect("chmod python");
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(err.contains("pip inspect returned invalid JSON"));
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_python_succeeds_while_executable_is_in_use() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let meta_dir = prefix.join("conda-meta");
+    let bin_dir = prefix.join("bin");
+    fs::create_dir_all(&meta_dir).expect("create conda-meta");
+    fs::create_dir_all(&bin_dir).expect("create bin");
+    fs::write(
+        meta_dir.join("python-3.12.0-0.json"),
+        r#"{
+  "name":"python",
+  "version":"3.12.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"python-3.12.0-0",
+  "spec":"python",
+  "source":"conda",
+  "depends":[],
+  "installed_at":"now",
+  "platform":"linux-64"
+}"#,
+    )
+    .expect("write python record");
+    fs::write(
+        meta_dir.join("history"),
+        "==> 2026-03-23 00:00:00 <==\n# create specs: [\"python\"]\n+ python-3.12.0-0\n",
+    )
+    .expect("write history");
+    let python = bin_dir.join("python");
+    fs::write(&python, "#!/bin/sh\nsleep 10\n").expect("write python executable");
+    let mut perms = fs::metadata(&python).expect("python meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&python, perms).expect("chmod python");
+
+    let mut child = std::process::Command::new(&python)
+        .spawn()
+        .expect("spawn python process");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    let output = remove
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], true);
+    assert!(
+        body["data"]["removed_names"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|item| item.as_str() == Some("python")))
+    );
+
+    assert!(!python.exists(), "in-use executable should be removed from prefix");
+    assert!(installed_package_names(&prefix).is_empty());
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]
