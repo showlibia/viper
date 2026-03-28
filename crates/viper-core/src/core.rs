@@ -960,14 +960,14 @@ fn platform_subdir(os: &str, arch: &str) -> String {
     match (os, arch) {
         ("linux", "x86_64") => "linux-64".to_string(),
         ("linux", "x86") | ("linux", "i686") => "linux-32".to_string(),
-        ("linux", "aarch64") => "linux-aarch64".to_string(),
+        ("linux", "aarch64") | ("linux", "arm64") => "linux-aarch64".to_string(),
         ("linux", "armv7") | ("linux", "armv7l") => "linux-armv7l".to_string(),
         ("linux", "armv6") | ("linux", "armv6l") => "linux-armv6l".to_string(),
         ("linux", "riscv64") => "linux-riscv64".to_string(),
         ("macos", "x86_64") => "osx-64".to_string(),
-        ("macos", "aarch64") => "osx-arm64".to_string(),
+        ("macos", "aarch64") | ("macos", "arm64") => "osx-arm64".to_string(),
         ("windows", "x86_64") => "win-64".to_string(),
-        ("windows", "aarch64") => "win-arm64".to_string(),
+        ("windows", "aarch64") | ("windows", "arm64") => "win-arm64".to_string(),
         ("windows", "x86") | ("windows", "i686") => "win-32".to_string(),
         _ => format!("{os}-{arch}"),
     }
@@ -984,13 +984,12 @@ fn current_virtual_packages() -> Vec<String> {
     match os {
         "linux" => {
             packages.push("__unix=0=0".to_string());
-            if let Some(version) = std::env::var("CONDA_OVERRIDE_LINUX")
+            let linux_version = std::env::var("CONDA_OVERRIDE_LINUX")
                 .ok()
                 .filter(|v| !v.is_empty())
                 .or_else(probe_linux_kernel_version)
-            {
-                packages.push(format!("__linux={version}=0"));
-            }
+                .unwrap_or_else(|| "0".to_string());
+            packages.push(format!("__linux={linux_version}=0"));
             if let Some(version) = std::env::var("CONDA_OVERRIDE_GLIBC")
                 .ok()
                 .filter(|v| !v.is_empty())
@@ -1001,13 +1000,12 @@ fn current_virtual_packages() -> Vec<String> {
         }
         "macos" => {
             packages.push("__unix=0=0".to_string());
-            if let Some(version) = std::env::var("CONDA_OVERRIDE_OSX")
+            let osx_version = std::env::var("CONDA_OVERRIDE_OSX")
                 .ok()
                 .filter(|v| !v.is_empty())
                 .or_else(probe_macos_version)
-            {
-                packages.push(format!("__osx={version}=0"));
-            }
+                .unwrap_or_else(|| "0".to_string());
+            packages.push(format!("__osx={osx_version}=0"));
         }
         "windows" => {
             if let Some(version) = std::env::var("CONDA_OVERRIDE_WIN")
@@ -1030,7 +1028,10 @@ fn archspec_for_platform(platform: &str) -> String {
     if matches!(platform, "linux-64" | "osx-64" | "win-64") {
         return detect_x86_64_archspec();
     }
-    if platform.ends_with("arm64") || platform.ends_with("aarch64") {
+    if platform == "linux-arm64" || platform.ends_with("aarch64") {
+        return "aarch64".to_string();
+    }
+    if platform.ends_with("arm64") {
         return "arm64".to_string();
     }
     if platform.ends_with("32") {
@@ -1320,7 +1321,10 @@ fn format_channel_name(channel: &str) -> String {
         if !without_scheme.starts_with("conda.anaconda.org/")
             && !without_scheme.starts_with("repo.anaconda.com/")
         {
-            return strip_known_subdir_suffix(without_repodata);
+            if should_strip_known_subdir_suffix(without_repodata) {
+                return strip_known_subdir_suffix(without_repodata);
+            }
+            return without_repodata.to_string();
         }
     }
     let without_scheme = without_repodata
@@ -1457,7 +1461,11 @@ fn normalize_channel_base_urls(channel: &str, platform: &str) -> Vec<String> {
         format!("https://conda.anaconda.org/{trimmed}")
     };
     let sanitized = strip_url_credentials(&normalized);
-    vec![strip_known_subdir_suffix(&sanitized)]
+    if should_strip_known_subdir_suffix(&sanitized) {
+        vec![strip_known_subdir_suffix(&sanitized)]
+    } else {
+        vec![sanitized]
+    }
 }
 
 fn strip_repodata_suffix(value: &str) -> &str {
@@ -1475,6 +1483,14 @@ fn strip_known_subdir_suffix(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn should_strip_known_subdir_suffix(value: &str) -> bool {
+    value.starts_with("file://")
+        || value.starts_with("https://conda.anaconda.org/")
+        || value.starts_with("http://conda.anaconda.org/")
+        || value.starts_with("https://repo.anaconda.com/")
+        || value.starts_with("http://repo.anaconda.com/")
 }
 
 fn strip_url_credentials(value: &str) -> String {
@@ -1645,11 +1661,15 @@ mod tests {
         );
         assert_eq!(
             format_channel_name("https://repo.example.com/team/conda/linux-64"),
-            "https://repo.example.com/team/conda"
+            "https://repo.example.com/team/conda/linux-64"
         );
         assert_eq!(
             format_channel_name("https://repo.example.com/pkgs/main/noarch"),
-            "https://repo.example.com/pkgs/main"
+            "https://repo.example.com/pkgs/main/noarch"
+        );
+        assert_eq!(
+            format_channel_name("https://repo.example.com/noarch"),
+            "https://repo.example.com/noarch"
         );
         assert_eq!(
             format_channel_name("https://repo.example.com/custom/channel"),
@@ -1664,7 +1684,7 @@ mod tests {
                 "conda-forge".to_string(),
                 "https://conda.anaconda.org/conda-forge/linux-64".to_string(),
                 "defaults".to_string(),
-                "https://repo.example.com/team/conda/noarch".to_string(),
+                "https://repo.example.com/team/conda".to_string(),
             ],
             "linux-64",
         );
@@ -1705,6 +1725,8 @@ mod tests {
     #[test]
     fn archspec_for_platform_uses_platform_tokens() {
         assert_eq!(archspec_for_platform("win-arm64"), "arm64");
+        assert_eq!(archspec_for_platform("linux-aarch64"), "aarch64");
+        assert_eq!(archspec_for_platform("linux-arm64"), "aarch64");
         assert_eq!(archspec_for_platform("linux-riscv64"), "riscv64");
         assert!(archspec_for_platform("linux-64").starts_with("x86_64"));
     }
