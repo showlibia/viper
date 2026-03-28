@@ -6017,7 +6017,7 @@ fn list_discovers_pip_site_packages_and_no_pip_hides_them() {
     let python = bin_dir.join("python");
     fs::write(
         &python,
-        "#!/bin/sh\nprintf '{\"environment\":{\"platform\":\"linux-64\"},\"installed\":[{\"installer\":\"pip\",\"metadata\":{\"name\":\"rich\",\"version\":\"13.7.1\"}}]}'\n",
+        "#!/bin/sh\nprintf '{\"environment\":{\"sys_platform\":\"linux\",\"platform_machine\":\"x86_64\"},\"installed\":[{\"installer\":\"pip\",\"metadata\":{\"name\":\"rich\",\"version\":\"13.7.1\"}}]}'\n",
     )
     .expect("write fake python");
     let mut perms = fs::metadata(&python).expect("python meta").permissions();
@@ -6055,7 +6055,7 @@ fn list_discovers_pip_site_packages_and_no_pip_hides_them() {
         .and_then(|pkg| pkg["platform"].as_str())
         .unwrap_or_default()
         .to_string();
-    assert_eq!(rich_platform, "linux-64");
+    assert_eq!(rich_platform, "linux-x86_64");
 
     let mut list_no_pip = Command::cargo_bin("viper").expect("binary exists");
     let output = list_no_pip
@@ -6406,6 +6406,76 @@ fn remove_python_succeeds_while_executable_is_in_use() {
     assert!(installed_package_names(&prefix).is_empty());
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(unix)]
+#[test]
+fn transaction_cleans_previous_mamba_trash_entries_before_apply() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let meta_dir = prefix.join("conda-meta");
+    let bin_dir = prefix.join("bin");
+    fs::create_dir_all(&meta_dir).expect("create conda-meta");
+    fs::create_dir_all(&bin_dir).expect("create bin");
+
+    fs::write(
+        meta_dir.join("python-3.12.0-0.json"),
+        r#"{
+  "name":"python",
+  "version":"3.12.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"python-3.12.0-0",
+  "spec":"python",
+  "source":"conda",
+  "depends":[],
+  "installed_at":"now",
+  "platform":"linux-64"
+}"#,
+    )
+    .expect("write python record");
+    fs::write(
+        meta_dir.join("history"),
+        "==> 2026-03-23 00:00:00 <==\n# create specs: [\"python\"]\n+ python-3.12.0-0\n",
+    )
+    .expect("write history");
+
+    let python = bin_dir.join("python");
+    fs::write(&python, "#!/bin/sh\nexit 0\n").expect("write python executable");
+    let mut perms = fs::metadata(&python).expect("python meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&python, perms).expect("chmod python");
+
+    let stale_trash = bin_dir.join("python.mamba_trash");
+    fs::write(&stale_trash, "stale").expect("write stale trash");
+    fs::write(meta_dir.join("mamba_trash.txt"), "bin/python.mamba_trash\n")
+        .expect("write trash index");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    assert!(!stale_trash.exists(), "stale trash file should be cleaned");
+    assert!(
+        !meta_dir.join("mamba_trash.txt").exists(),
+        "trash index should be removed when empty"
+    );
 }
 
 #[test]

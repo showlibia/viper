@@ -620,13 +620,12 @@ impl EnvironmentState {
 }
 
 fn discover_pip_site_packages(prefix: &Path) -> Result<Vec<DiscoveredPipPackage>, CoreError> {
-    let python = prefix.join("bin").join("python");
-    if !python.exists() {
+    let Some(python) = resolve_python_from_prefix_path(prefix) else {
         return Err(CoreError::PrefixState(format!(
-            "cannot discover pip site-packages because '{}' is missing",
-            python.display()
+            "cannot discover pip site-packages because no python executable was found in '{}'",
+            prefix.display()
         )));
-    }
+    };
     let output = match Command::new(&python)
         .args(["-m", "pip", "inspect", "--local"])
         .output()
@@ -706,19 +705,67 @@ fn discover_pip_site_packages(prefix: &Path) -> Result<Vec<DiscoveredPipPackage>
 }
 
 fn inspect_platform(environment: &serde_json::Value) -> Option<String> {
-    environment
-        .get("platform")
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            environment
-                .get("default_environment")
-                .and_then(|v| v.get("platform"))
-                .and_then(|v| v.as_str())
-                .filter(|v| !v.is_empty())
-                .map(ToOwned::to_owned)
-        })
+    if let (Some(sys_platform), Some(machine)) = (
+        environment.get("sys_platform").and_then(|v| v.as_str()),
+        environment.get("platform_machine").and_then(|v| v.as_str()),
+    ) && !sys_platform.is_empty()
+        && !machine.is_empty()
+    {
+        return Some(format!("{sys_platform}-{machine}"));
+    }
+    if let (Some(sys_platform), Some(machine)) = (
+        environment
+            .get("default_environment")
+            .and_then(|v| v.get("sys_platform"))
+            .and_then(|v| v.as_str()),
+        environment
+            .get("default_environment")
+            .and_then(|v| v.get("platform_machine"))
+            .and_then(|v| v.as_str()),
+    ) && !sys_platform.is_empty()
+        && !machine.is_empty()
+    {
+        return Some(format!("{sys_platform}-{machine}"));
+    }
+    None
+}
+
+fn resolve_python_from_prefix_path(prefix: &Path) -> Option<PathBuf> {
+    let mut search_dirs = prefix_path_dirs(prefix);
+    if let Some(current_path) = std::env::var_os("PATH") {
+        search_dirs.extend(std::env::split_paths(&current_path));
+    }
+    for dir in search_dirs {
+        for candidate in python_command_names() {
+            let path = dir.join(candidate);
+            if path.exists() && path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn prefix_path_dirs(prefix: &Path) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        vec![prefix.clone(), prefix.join("Scripts"), prefix.join("Library").join("bin")]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![prefix.join("bin")]
+    }
+}
+
+fn python_command_names() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &["python.exe", "python.bat", "python"]
+    }
+    #[cfg(not(windows))]
+    {
+        &["python"]
+    }
 }
 
 fn requested_name_from_history_spec(spec: &str) -> Option<String> {

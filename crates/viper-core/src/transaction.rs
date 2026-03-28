@@ -190,6 +190,7 @@ impl TransactionExecutor {
         let mut linked = 0usize;
         let mut pip_changed = 0usize;
         let tx_result = (|| -> Result<(), CoreError> {
+            clean_trash_files(prefix)?;
             if self.ensure_layout {
                 ensure_prefix_layout(prefix)?;
             }
@@ -591,5 +592,38 @@ fn set_executable_if_unix(path: &Path) -> Result<(), CoreError> {
 
 #[cfg(windows)]
 fn set_executable_if_unix(_path: &Path) -> Result<(), CoreError> {
+    Ok(())
+}
+
+fn clean_trash_files(prefix: &Path) -> Result<(), CoreError> {
+    let trash_index = prefix.join("conda-meta").join("mamba_trash.txt");
+    if !trash_index.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&trash_index)?;
+    let mut survivors = Vec::new();
+    for line in content.lines() {
+        let rel = line.trim();
+        if rel.is_empty() {
+            continue;
+        }
+        let path = prefix.join(rel);
+        if !path.exists() {
+            continue;
+        }
+        let remove_result = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if remove_result.is_err() {
+            survivors.push(rel.to_string());
+        }
+    }
+    if survivors.is_empty() {
+        fs::remove_file(trash_index)?;
+    } else {
+        fs::write(trash_index, format!("{}\n", survivors.join("\n")))?;
+    }
     Ok(())
 }
