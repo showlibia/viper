@@ -159,6 +159,86 @@ pub struct TransactionOutcome {
     pub pip_changed: usize,
 }
 
+#[derive(Debug, Clone)]
+struct PayloadRestore {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct RollbackJournal {
+    state_before: EnvironmentState,
+    history_before: Option<String>,
+    had_conda_meta: bool,
+    had_bin: bool,
+    had_pkgs: bool,
+    restored_payloads: Vec<PayloadRestore>,
+    created_payloads: Vec<PathBuf>,
+}
+
+impl RollbackJournal {
+    fn capture(prefix: &Path, state_before: EnvironmentState) -> Result<Self, CoreError> {
+        let history_path = history_file_path(prefix);
+        let history_before = match fs::read_to_string(&history_path) {
+            Ok(raw) => Some(raw),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(CoreError::Io(err)),
+        };
+        Ok(Self {
+            state_before,
+            history_before,
+            had_conda_meta: prefix.join("conda-meta").exists(),
+            had_bin: prefix.join("bin").exists(),
+            had_pkgs: prefix.join("pkgs").exists(),
+            restored_payloads: Vec::new(),
+            created_payloads: Vec::new(),
+        })
+    }
+
+    fn rollback(&self, prefix: &Path) -> Result<(), CoreError> {
+        for created in self.created_payloads.iter().rev() {
+            if created.exists() {
+                fs::remove_file(created)?;
+            }
+        }
+        for restore in self.restored_payloads.iter().rev() {
+            if let Some(parent) = restore.path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&restore.path, &restore.bytes)?;
+            set_executable_if_unix(&restore.path)?;
+        }
+
+        self.state_before.persist(prefix)?;
+        let history_path = history_file_path(prefix);
+        match &self.history_before {
+            Some(raw) => {
+                if let Some(parent) = history_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&history_path, raw)?;
+            }
+            None => {
+                if history_path.exists() {
+                    fs::remove_file(history_path)?;
+                }
+            }
+        }
+
+        if !self.had_conda_meta {
+            remove_dir_if_empty(prefix.join("conda-meta"))?;
+        }
+        if !self.had_bin {
+            remove_dir_if_empty(prefix.join("bin"))?;
+        }
+        if !self.had_pkgs {
+            remove_dir_if_empty(prefix.join("pkgs"))?;
+        }
+        remove_dir_if_empty(prefix.to_path_buf())?;
+        Ok(())
+    }
+}
+
 impl TransactionExecutor {
     pub fn apply(
         &self,
@@ -184,7 +264,7 @@ impl TransactionExecutor {
         }
 
         clean_trash_files(prefix)?;
-        let snapshot = PrefixSnapshot::capture(prefix)?;
+        let mut rollback = RollbackJournal::capture(prefix, state.clone())?;
         let mut fetched = 0usize;
         let mut extracted = 0usize;
         let mut unlinked = 0usize;
@@ -209,7 +289,7 @@ impl TransactionExecutor {
                 ));
             }
 
-            self.run_unlink_phase(prefix, plan)?;
+            self.run_unlink_phase(prefix, plan, &mut rollback)?;
             unlinked = state.remove_conda_unlinks(&plan.unlink);
             if should_fail("after_unlink") {
                 return Err(CoreError::TransactionFailed(
@@ -219,7 +299,7 @@ impl TransactionExecutor {
 
             linked =
                 state.install_conda_links(&plan.link, &self.requested_specs, &self.platform)?;
-            self.run_link_phase(prefix, plan)?;
+            self.run_link_phase(prefix, plan, &mut rollback)?;
             if should_fail("after_link") {
                 return Err(CoreError::TransactionFailed(
                     "injected failure after link phase".to_string(),
@@ -262,7 +342,8 @@ impl TransactionExecutor {
             Ok(())
         })();
         if let Err(err) = tx_result {
-            PrefixSnapshot::restore(prefix, &snapshot)?;
+            let _ = self.cleanup_stage_artifacts(prefix);
+            rollback.rollback(prefix)?;
             return Err(err);
         }
 
@@ -330,18 +411,37 @@ impl TransactionExecutor {
         Ok(())
     }
 
-    fn run_unlink_phase(&self, prefix: &Path, plan: &TransactionPlan) -> Result<(), CoreError> {
+    fn run_unlink_phase(
+        &self,
+        prefix: &Path,
+        plan: &TransactionPlan,
+        rollback: &mut RollbackJournal,
+    ) -> Result<(), CoreError> {
         for unlink in plan.unlink.iter().filter(|item| item.source == "conda") {
             let payload = package_payload_path(prefix, &unlink.name);
             if !payload.exists() {
                 continue;
             }
-            remove_payload_path(prefix, &payload)?;
+            let bytes = fs::read(&payload)?;
+            match remove_payload_path(prefix, &payload)? {
+                RemovePayloadOutcome::Missing => {}
+                RemovePayloadOutcome::Removed | RemovePayloadOutcome::RenamedToTrash => {
+                    rollback.restored_payloads.push(PayloadRestore {
+                        path: payload,
+                        bytes,
+                    });
+                }
+            }
         }
         Ok(())
     }
 
-    fn run_link_phase(&self, prefix: &Path, plan: &TransactionPlan) -> Result<(), CoreError> {
+    fn run_link_phase(
+        &self,
+        prefix: &Path,
+        plan: &TransactionPlan,
+        rollback: &mut RollbackJournal,
+    ) -> Result<(), CoreError> {
         for link in plan.link.iter().filter(|item| item.source == "conda") {
             let payload = package_payload_path(prefix, &link.name);
             if let Some(parent) = payload.parent() {
@@ -349,145 +449,10 @@ impl TransactionExecutor {
             }
             fs::write(&payload, package_payload_contents(link))?;
             set_executable_if_unix(&payload)?;
+            rollback.created_payloads.push(payload);
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone)]
-enum PrefixSnapshot {
-    MissingPrefix,
-    Existing { entries: Vec<SnapshotEntry> },
-}
-
-#[derive(Debug, Clone)]
-enum SnapshotEntry {
-    Dir(PathBuf),
-    File(PathBuf, Vec<u8>),
-    Symlink(PathBuf, PathBuf, bool),
-}
-
-impl PrefixSnapshot {
-    fn capture(prefix: &Path) -> Result<Self, CoreError> {
-        if !prefix.exists() {
-            return Ok(Self::MissingPrefix);
-        }
-        let mut entries = Vec::new();
-        collect_entries(prefix, prefix, &mut entries)?;
-        Ok(Self::Existing { entries })
-    }
-
-    fn restore(prefix: &Path, snapshot: &Self) -> Result<(), CoreError> {
-        match snapshot {
-            Self::MissingPrefix => {
-                if prefix.exists() {
-                    fs::remove_dir_all(prefix)?;
-                }
-                Ok(())
-            }
-            Self::Existing { entries } => {
-                if prefix.exists() {
-                    fs::remove_dir_all(prefix)?;
-                }
-                fs::create_dir_all(prefix)?;
-                let mut dirs = entries
-                    .iter()
-                    .filter_map(|entry| {
-                        if let SnapshotEntry::Dir(path) = entry {
-                            Some(path.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                dirs.sort_by_key(|path| path.components().count());
-                for rel in dirs {
-                    if rel.as_os_str().is_empty() {
-                        continue;
-                    }
-                    fs::create_dir_all(prefix.join(rel))?;
-                }
-                for entry in entries {
-                    if let SnapshotEntry::File(rel, content) = entry {
-                        let path = prefix.join(rel);
-                        if let Some(parent) = path.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-                        fs::write(path, content)?;
-                    }
-                    if let SnapshotEntry::Symlink(rel, target, is_dir) = entry {
-                        let path = prefix.join(rel);
-                        if let Some(parent) = path.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-                        create_symlink(&path, target, *is_dir)?;
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-fn collect_entries(
-    prefix: &Path,
-    current: &Path,
-    out: &mut Vec<SnapshotEntry>,
-) -> Result<(), CoreError> {
-    let rel = current
-        .strip_prefix(prefix)
-        .map_err(|e| CoreError::TransactionFailed(e.to_string()))?
-        .to_path_buf();
-    out.push(SnapshotEntry::Dir(rel));
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() {
-            let rel = path
-                .strip_prefix(prefix)
-                .map_err(|e| CoreError::TransactionFailed(e.to_string()))?
-                .to_path_buf();
-            let target = fs::read_link(&path)?;
-            let is_dir = fs::metadata(&path).is_ok_and(|m| m.is_dir());
-            out.push(SnapshotEntry::Symlink(rel, target, is_dir));
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_entries(prefix, &path, out)?;
-            continue;
-        }
-        if file_type.is_file() {
-            let rel = path
-                .strip_prefix(prefix)
-                .map_err(|e| CoreError::TransactionFailed(e.to_string()))?
-                .to_path_buf();
-            out.push(SnapshotEntry::File(rel, fs::read(&path)?));
-            continue;
-        }
-        return Err(CoreError::TransactionFailed(format!(
-            "unsupported filesystem entry in snapshot: {}",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_symlink(path: &Path, target: &Path, _is_dir: bool) -> Result<(), CoreError> {
-    std::os::unix::fs::symlink(target, path)?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn create_symlink(path: &Path, target: &Path, is_dir: bool) -> Result<(), CoreError> {
-    if is_dir {
-        std::os::windows::fs::symlink_dir(target, path)?;
-    } else {
-        std::os::windows::fs::symlink_file(target, path)?;
-    }
-    Ok(())
 }
 
 fn should_fail(stage: &str) -> bool {
@@ -529,7 +494,14 @@ fn package_payload_path(prefix: &Path, package_name: &str) -> PathBuf {
     }
 }
 
-fn remove_payload_path(prefix: &Path, payload: &Path) -> Result<(), CoreError> {
+#[cfg_attr(not(windows), allow(dead_code))]
+enum RemovePayloadOutcome {
+    Missing,
+    Removed,
+    RenamedToTrash,
+}
+
+fn remove_payload_path(prefix: &Path, payload: &Path) -> Result<RemovePayloadOutcome, CoreError> {
     #[cfg(windows)]
     {
         return remove_payload_path_windows(prefix, payload);
@@ -537,15 +509,24 @@ fn remove_payload_path(prefix: &Path, payload: &Path) -> Result<(), CoreError> {
     #[cfg(not(windows))]
     {
         let _ = prefix;
+        if !payload.exists() {
+            return Ok(RemovePayloadOutcome::Missing);
+        }
         fs::remove_file(payload)?;
-        Ok(())
+        Ok(RemovePayloadOutcome::Removed)
     }
 }
 
 #[cfg(windows)]
-fn remove_payload_path_windows(prefix: &Path, payload: &Path) -> Result<(), CoreError> {
+fn remove_payload_path_windows(
+    prefix: &Path,
+    payload: &Path,
+) -> Result<RemovePayloadOutcome, CoreError> {
+    if !payload.exists() {
+        return Ok(RemovePayloadOutcome::Missing);
+    }
     match fs::remove_file(payload) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(RemovePayloadOutcome::Removed),
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
             let file_name = payload
                 .file_name()
@@ -574,7 +555,7 @@ fn remove_payload_path_windows(prefix: &Path, payload: &Path) -> Result<(), Core
             existing.push_str(&rel);
             existing.push('\n');
             fs::write(trash_record, existing)?;
-            Ok(())
+            Ok(RemovePayloadOutcome::RenamedToTrash)
         }
         Err(err) => Err(CoreError::Io(err)),
     }
@@ -624,6 +605,20 @@ fn clean_trash_files(prefix: &Path) -> Result<(), CoreError> {
         fs::remove_file(trash_index)?;
     } else {
         fs::write(trash_index, format!("{}\n", survivors.join("\n")))?;
+    }
+    Ok(())
+}
+
+fn history_file_path(prefix: &Path) -> PathBuf {
+    prefix.join("conda-meta").join("history")
+}
+
+fn remove_dir_if_empty(path: PathBuf) -> Result<(), CoreError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if fs::read_dir(&path)?.next().is_none() {
+        fs::remove_dir(path)?;
     }
     Ok(())
 }
