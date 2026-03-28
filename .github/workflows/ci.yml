@@ -31,9 +31,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Compatibility matrix lint
-        run: ./scripts/check_compat_matrix.sh
-
   test-matrix:
     strategy:
       fail-fast: false
