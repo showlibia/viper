@@ -12,6 +12,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout mamba upstream refs
+        uses: actions/checkout@v4
+        with:
+          repository: mamba-org/mamba
+          path: mamba
+          fetch-depth: 1
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -35,6 +42,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Checkout mamba upstream refs
+        uses: actions/checkout@v4
+        with:
+          repository: mamba-org/mamba
+          path: mamba
+          fetch-depth: 1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
