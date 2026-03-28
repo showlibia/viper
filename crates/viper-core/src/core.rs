@@ -8,8 +8,7 @@ use crate::config::{ConfigInput, ConfigStore, build_config, name_to_target_prefi
 use crate::error::CoreError;
 use crate::repodata::{RepoPackage, RepodataSource, fetch_packages};
 use crate::solver::{
-    SolveOptions, SolveRequest, SolveResult, production_solver_engine,
-    spec_requires_full_repodata,
+    SolveOptions, SolveRequest, SolveResult, production_solver_engine, spec_requires_full_repodata,
 };
 use crate::spec::{
     SpecFileKind, normalize_spec, package_name_from_spec, parse_explicit_url, parse_match_spec,
@@ -493,8 +492,10 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     warnings,
                 )
             } else {
-                let state =
-                    EnvironmentState::load_with_pip_discovery(&target_prefix, !list_options.no_pip)?;
+                let state = EnvironmentState::load_with_pip_discovery(
+                    &target_prefix,
+                    !list_options.no_pip,
+                )?;
                 let rendered = render_list_output(state.packages, &list_options)?;
                 (
                     json!({
@@ -1172,9 +1173,7 @@ fn select_repodata_source(specs: &[String]) -> RepodataSource {
     }
 }
 
-fn solve_with_production_entry(
-    request: &SolveRequest,
-) -> Result<SolveResult, CoreError> {
+fn solve_with_production_entry(request: &SolveRequest) -> Result<SolveResult, CoreError> {
     let _engine = production_solver_engine();
     request.solve().map_err(CoreError::UnsatisfiedSpecs)
 }

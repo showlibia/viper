@@ -4992,7 +4992,8 @@ fn create_failure_rolls_back_symlinked_prefix_layout() {
         .assert()
         .failure();
 
-    let file_link_meta = fs::symlink_metadata(prefix.join("keep-link.txt")).expect("file link meta");
+    let file_link_meta =
+        fs::symlink_metadata(prefix.join("keep-link.txt")).expect("file link meta");
     assert!(file_link_meta.file_type().is_symlink());
     assert_eq!(
         fs::read_link(prefix.join("keep-link.txt")).expect("read file link"),
@@ -6189,7 +6190,9 @@ fn list_does_not_fallback_to_host_path_python_for_pip_discovery() {
         "#!/bin/sh\nprintf '{\"environment\":{\"sys_platform\":\"fakeos\",\"platform_machine\":\"fakearch\"},\"installed\":[{\"installer\":\"pip\",\"metadata\":{\"name\":\"host-leak\",\"version\":\"1.0\"}}]}'\n",
     )
     .expect("write host python");
-    let mut perms = fs::metadata(&host_python).expect("host python meta").permissions();
+    let mut perms = fs::metadata(&host_python)
+        .expect("host python meta")
+        .permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&host_python, perms).expect("chmod host python");
 
@@ -6466,7 +6469,10 @@ fn remove_python_succeeds_while_executable_is_in_use() {
             .is_some_and(|names| names.iter().any(|item| item.as_str() == Some("python")))
     );
 
-    assert!(!python.exists(), "in-use executable should be removed from prefix");
+    assert!(
+        !python.exists(),
+        "in-use executable should be removed from prefix"
+    );
     assert!(installed_package_names(&prefix).is_empty());
     let _ = child.kill();
     let _ = child.wait();
@@ -6606,7 +6612,10 @@ fn transaction_cleanup_survives_failpoint_rollback() {
         .assert()
         .failure();
 
-    assert!(!stale_trash.exists(), "trash file should stay cleaned after rollback");
+    assert!(
+        !stale_trash.exists(),
+        "trash file should stay cleaned after rollback"
+    );
     assert!(
         !meta_dir.join("mamba_trash.txt").exists(),
         "trash index should stay removed after rollback"
@@ -6782,7 +6791,10 @@ fn windows_remove_in_use_creates_and_tracks_trash_survivor() {
         .assert()
         .success();
 
-    assert!(!prefix.join("python.exe").exists(), "python.exe should be removed");
+    assert!(
+        !prefix.join("python.exe").exists(),
+        "python.exe should be removed"
+    );
     let trash_path = prefix.join("python.exe.mamba_trash");
     if trash_path.exists() {
         windows_assert_trash_index_matches_payloads(&prefix);
@@ -7264,7 +7276,9 @@ fn serve_single_http_file(name: &str, body: &str) -> (String, thread::JoinHandle
         let (mut stream, _) = listener.accept().expect("accept connection");
         let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
         let mut request_line = String::new();
-        reader.read_line(&mut request_line).expect("read request line");
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
         let mut line = String::new();
         loop {
             line.clear();

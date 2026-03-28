@@ -261,14 +261,17 @@ fn read_spec_source(source: &str) -> Result<String, CoreError> {
         return fs::read_to_string(path).map_err(CoreError::from);
     }
     if source.starts_with("http://") || source.starts_with("https://") {
-        let response = reqwest::blocking::get(source).map_err(|e| CoreError::Network(e.to_string()))?;
+        let response =
+            reqwest::blocking::get(source).map_err(|e| CoreError::Network(e.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Network(format!(
                 "failed to fetch spec file '{source}': HTTP {}",
                 response.status()
             )));
         }
-        return response.text().map_err(|e| CoreError::Network(e.to_string()));
+        return response
+            .text()
+            .map_err(|e| CoreError::Network(e.to_string()));
     }
     fs::read_to_string(source).map_err(CoreError::from)
 }

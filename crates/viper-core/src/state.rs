@@ -745,7 +745,11 @@ fn resolve_python_from_prefix_path(prefix: &Path) -> Option<PathBuf> {
 fn prefix_path_dirs(prefix: &Path) -> Vec<PathBuf> {
     #[cfg(windows)]
     {
-        vec![prefix.clone(), prefix.join("Scripts"), prefix.join("Library").join("bin")]
+        vec![
+            prefix.clone(),
+            prefix.join("Scripts"),
+            prefix.join("Library").join("bin"),
+        ]
     }
     #[cfg(not(windows))]
     {
