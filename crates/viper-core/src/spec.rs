@@ -828,7 +828,7 @@ https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2#deadbeef
             r#"
 package:
   - manager: conda
-    url: https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2
+    url: https://conda.anaconda.org/conda-forge/noarch/tzdata-2024a-h0c530f3_0.tar.bz2
   - manager: pip
     name: rich
     version: 13.7.1
@@ -839,6 +839,13 @@ package:
         let parsed = parse_spec_file(&file).expect("parse lockfile");
         assert_eq!(parsed.kind, SpecFileKind::Lock);
         assert_eq!(parsed.env.conda_specs.len(), 1);
+        assert_eq!(
+            parsed.env.conda_specs,
+            vec![
+                "https://conda.anaconda.org/conda-forge/noarch/tzdata-2024a-h0c530f3_0.tar.bz2"
+                    .to_string()
+            ]
+        );
         assert_eq!(parsed.env.pip_specs, vec!["rich==13.7.1".to_string()]);
     }
 
