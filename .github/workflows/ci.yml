@@ -16,6 +16,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: mamba-org/mamba
+          ref: 30ab0dde384d0055939d767577a05b6078bb2887
           path: mamba
           fetch-depth: 1
 
@@ -47,6 +48,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: mamba-org/mamba
+          ref: 30ab0dde384d0055939d767577a05b6078bb2887
           path: mamba
           fetch-depth: 1
 
