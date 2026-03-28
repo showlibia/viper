@@ -1021,6 +1021,9 @@ fn current_virtual_packages() -> Vec<String> {
         _ => {}
     }
     packages.push(format!("__archspec=1={archspec}"));
+    if let Some(version) = probe_cuda_version() {
+        packages.push(format!("__cuda={version}=0"));
+    }
     packages
 }
 
@@ -1101,6 +1104,27 @@ fn probe_macos_version() -> Option<String> {
 fn probe_windows_version() -> Option<String> {
     let output = probe_command_output("cmd", &["/C", "ver"])?;
     parse_windows_version_from_ver_output(&output)
+}
+
+fn probe_cuda_version() -> Option<String> {
+    if let Some(version) = std::env::var("CONDA_OVERRIDE_CUDA")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        return normalize_cuda_version(&version);
+    }
+    let output = probe_command_output(
+        "nvidia-smi",
+        &["--query-gpu=cuda_version", "--format=csv,noheader"],
+    )?;
+    let first_line = output.lines().next()?.trim();
+    normalize_cuda_version(first_line)
+}
+
+fn normalize_cuda_version(value: &str) -> Option<String> {
+    let version_re = Regex::new(r"(\d+)\.(\d+)").ok()?;
+    let captures = version_re.captures(value)?;
+    Some(format!("{}.{}", &captures[1], &captures[2]))
 }
 
 fn probe_command_output(command: &str, args: &[&str]) -> Option<String> {
@@ -1427,6 +1451,24 @@ fn expanded_channel_urls(channels: &[String], platform: &str) -> Vec<String> {
     for channel in channels {
         let bases = normalize_channel_base_urls(channel, platform);
         for base in bases {
+            if let Some((prefix, suffix)) = split_known_subdir_suffix(&base) {
+                if suffix == platform {
+                    for url in [base.clone(), format!("{prefix}/noarch")] {
+                        if !urls.iter().any(|existing| existing == &url) {
+                            urls.push(url);
+                        }
+                    }
+                    continue;
+                }
+                if suffix == "noarch" {
+                    for url in [format!("{prefix}/{platform}"), base.clone()] {
+                        if !urls.iter().any(|existing| existing == &url) {
+                            urls.push(url);
+                        }
+                    }
+                    continue;
+                }
+            }
             for suffix in [platform, "noarch"] {
                 let url = format!("{base}/{suffix}");
                 if !urls.iter().any(|existing| existing == &url) {
@@ -1482,6 +1524,15 @@ fn strip_known_subdir_suffix(value: &str) -> String {
         prefix.to_string()
     } else {
         value.to_string()
+    }
+}
+
+fn split_known_subdir_suffix(value: &str) -> Option<(&str, &str)> {
+    let (prefix, suffix) = value.rsplit_once('/')?;
+    if is_known_conda_subdir(suffix) {
+        Some((prefix, suffix))
+    } else {
+        None
     }
 }
 
@@ -1684,7 +1735,7 @@ mod tests {
                 "conda-forge".to_string(),
                 "https://conda.anaconda.org/conda-forge/linux-64".to_string(),
                 "defaults".to_string(),
-                "https://repo.example.com/team/conda".to_string(),
+                "https://repo.example.com/team/conda/linux-64".to_string(),
             ],
             "linux-64",
         );
@@ -1741,5 +1792,15 @@ mod tests {
             strip_url_credentials("https://repo.example.com/team"),
             "https://repo.example.com/team"
         );
+    }
+
+    #[test]
+    fn normalize_cuda_version_extracts_major_minor() {
+        assert_eq!(normalize_cuda_version("12.4"), Some("12.4".to_string()));
+        assert_eq!(
+            normalize_cuda_version("CUDA Version: 11.8"),
+            Some("11.8".to_string())
+        );
+        assert_eq!(normalize_cuda_version("unknown"), None);
     }
 }
