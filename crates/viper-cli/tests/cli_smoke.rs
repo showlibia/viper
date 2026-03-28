@@ -6689,14 +6689,73 @@ fn windows_launch_locked_python(python_exe: &std::path::Path) -> std::process::C
 }
 
 #[cfg(windows)]
-fn windows_trash_entries(prefix: &std::path::Path) -> Vec<String> {
+fn windows_trash_entries(prefix: &std::path::Path) -> Option<Vec<String>> {
     let path = prefix.join("conda-meta").join("mamba_trash.txt");
-    let raw = fs::read_to_string(path).unwrap_or_default();
-    raw.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>()
+    let raw = fs::read_to_string(path).ok()?;
+    Some(
+        raw.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[cfg(windows)]
+fn windows_actual_trash_payloads(prefix: &std::path::Path) -> Vec<String> {
+    let mut pending = vec![prefix.to_path_buf()];
+    let mut payloads = Vec::new();
+    while let Some(dir) = pending.pop() {
+        let Ok(read_dir) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".mamba_trash"))
+                && let Ok(rel) = path.strip_prefix(prefix)
+            {
+                payloads.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    payloads.sort();
+    payloads
+}
+
+#[cfg(windows)]
+fn windows_assert_trash_index_matches_payloads(prefix: &std::path::Path) {
+    use std::collections::BTreeSet;
+
+    let payloads = windows_actual_trash_payloads(prefix)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let entries = windows_trash_entries(prefix)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+    if payloads.is_empty() {
+        assert!(
+            windows_trash_entries(prefix).is_none(),
+            "mamba_trash.txt must be absent when no trash payloads exist"
+        );
+        return;
+    }
+    assert!(
+        windows_trash_entries(prefix).is_some(),
+        "mamba_trash.txt must exist when trash payloads exist"
+    );
+    assert_eq!(
+        entries, payloads,
+        "mamba_trash.txt must exactly match the existing .mamba_trash payload set"
+    );
 }
 
 #[cfg(windows)]
@@ -6723,12 +6782,15 @@ fn windows_remove_in_use_creates_and_tracks_trash_survivor() {
         .assert()
         .success();
 
+    assert!(!prefix.join("python.exe").exists(), "python.exe should be removed");
     let trash_path = prefix.join("python.exe.mamba_trash");
     if trash_path.exists() {
-        let entries = windows_trash_entries(&prefix);
-        assert!(entries.iter().any(|entry| entry.ends_with("python.exe.mamba_trash")));
+        windows_assert_trash_index_matches_payloads(&prefix);
     } else {
-        assert!(windows_trash_entries(&prefix).is_empty());
+        assert!(
+            windows_trash_entries(&prefix).is_none(),
+            "mamba_trash.txt should not exist when no trash payload was created"
+        );
     }
 
     let _ = child.kill();
@@ -6760,26 +6822,39 @@ fn windows_trash_survives_mutation_while_lock_held_and_cleans_after_release() {
         .success();
 
     let had_trash = prefix.join("python.exe.mamba_trash").exists();
+    let before_payloads = windows_actual_trash_payloads(&prefix);
+    windows_assert_trash_index_matches_payloads(&prefix);
+
+    let mut remove_numpy = Command::cargo_bin("viper").expect("binary exists");
+    remove_numpy
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
     if had_trash {
-        let before = windows_trash_entries(&prefix);
-        assert!(before.iter().any(|entry| entry.ends_with("python.exe.mamba_trash")));
-
-        let mut remove_numpy = Command::cargo_bin("viper").expect("binary exists");
-        remove_numpy
-            .env("HOME", tmp_home.path())
-            .args([
-                "--no-rc",
-                "remove",
-                "-p",
-                prefix.to_str().expect("utf8"),
-                "numpy",
-                "--json",
-            ])
-            .assert()
-            .success();
-
-        let during = windows_trash_entries(&prefix);
-        assert!(during.iter().any(|entry| entry.ends_with("python.exe.mamba_trash")));
+        let during_payloads = windows_actual_trash_payloads(&prefix);
+        assert_eq!(
+            during_payloads, before_payloads,
+            "trash payload set should remain unchanged while lock is still held"
+        );
+        windows_assert_trash_index_matches_payloads(&prefix);
+    } else {
+        assert!(
+            !prefix.join("python.exe.mamba_trash").exists(),
+            "no-trash branch should not create trash payload on second mutation"
+        );
+        assert!(
+            windows_trash_entries(&prefix).is_none(),
+            "no-trash branch should not create mamba_trash.txt on second mutation"
+        );
     }
 
     let _ = child.kill();
@@ -6805,8 +6880,8 @@ fn windows_trash_survives_mutation_while_lock_held_and_cleans_after_release() {
         "trash payload should be cleaned after lock release and next mutation"
     );
     assert!(
-        windows_trash_entries(&prefix).is_empty(),
-        "trash index should be empty after cleanup"
+        windows_trash_entries(&prefix).is_none(),
+        "trash index should be removed after cleanup"
     );
 }
 
@@ -6838,10 +6913,14 @@ fn windows_after_unlink_rollback_restores_python_and_retains_trackable_trash() {
     let names = installed_package_names(&prefix);
     assert!(names.iter().any(|name| name == "python"));
     assert!(prefix.join("python.exe").exists());
+    let history = fs::read_to_string(prefix.join("conda-meta").join("history")).unwrap_or_default();
+    assert!(
+        history.contains("python-3.12.0-0"),
+        "rollback should keep python history metadata available"
+    );
 
     if prefix.join("python.exe.mamba_trash").exists() {
-        let entries = windows_trash_entries(&prefix);
-        assert!(entries.iter().any(|entry| entry.ends_with("python.exe.mamba_trash")));
+        windows_assert_trash_index_matches_payloads(&prefix);
     }
 
     let _ = child.kill();
@@ -6867,8 +6946,8 @@ fn windows_after_unlink_rollback_restores_python_and_retains_trackable_trash() {
         "tracked trash should be cleaned after release and later mutation"
     );
     assert!(
-        windows_trash_entries(&prefix).is_empty(),
-        "trash index should be cleaned after later mutation"
+        windows_trash_entries(&prefix).is_none(),
+        "trash index should be removed after later mutation"
     );
 }
 
