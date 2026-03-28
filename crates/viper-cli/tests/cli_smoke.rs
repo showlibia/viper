@@ -6613,6 +6613,265 @@ fn transaction_cleanup_survives_failpoint_rollback() {
     );
 }
 
+#[cfg(windows)]
+fn windows_seed_python_numpy_prefix(
+    prefix: &std::path::Path,
+    tmp_home: &std::path::Path,
+) -> std::path::PathBuf {
+    let meta_dir = prefix.join("conda-meta");
+    fs::create_dir_all(&meta_dir).expect("create conda-meta");
+    fs::write(
+        meta_dir.join("python-3.12.0-0.json"),
+        r#"{
+  "name":"python",
+  "version":"3.12.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/win-64/python-3.12.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"python-3.12.0-0",
+  "spec":"python",
+  "source":"conda",
+  "depends":[],
+  "installed_at":"now",
+  "platform":"win-64"
+}"#,
+    )
+    .expect("write python record");
+    fs::write(
+        meta_dir.join("numpy-2.0.0-0.json"),
+        r#"{
+  "name":"numpy",
+  "version":"2.0.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/win-64/numpy-2.0.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"numpy-2.0.0-0",
+  "spec":"numpy",
+  "source":"conda",
+  "depends":["python >=3.12,<3.13"],
+  "installed_at":"now",
+  "platform":"win-64"
+}"#,
+    )
+    .expect("write numpy record");
+    fs::write(
+        meta_dir.join("history"),
+        "==> 2026-03-23 00:00:00 <==\n# create specs: [\"python\",\"numpy\"]\n+ python-3.12.0-0\n+ numpy-2.0.0-0\n",
+    )
+    .expect("write history");
+
+    seed_repodata_cache(
+        tmp_home,
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0"), ("numpy", "2.0.0", "0")],
+    );
+
+    let python_exe = prefix.join("python.exe");
+    let cmd_exe = std::env::var("ComSpec")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "C:\\Windows\\System32\\cmd.exe".to_string());
+    fs::copy(cmd_exe, &python_exe).expect("copy executable payload");
+    fs::write(prefix.join("numpy.exe"), "numpy payload").expect("write numpy payload");
+    python_exe
+}
+
+#[cfg(windows)]
+fn windows_launch_locked_python(python_exe: &std::path::Path) -> std::process::Child {
+    std::process::Command::new(python_exe)
+        .args(["/C", "ping", "-n", "20", "127.0.0.1", ">", "NUL"])
+        .spawn()
+        .expect("spawn locked python process")
+}
+
+#[cfg(windows)]
+fn windows_trash_entries(prefix: &std::path::Path) -> Vec<String> {
+    let path = prefix.join("conda-meta").join("mamba_trash.txt");
+    let raw = fs::read_to_string(path).unwrap_or_default();
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>()
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_remove_in_use_creates_and_tracks_trash_survivor() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let python_exe = windows_seed_python_numpy_prefix(&prefix, tmp_home.path());
+    let mut child = windows_launch_locked_python(&python_exe);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let trash_path = prefix.join("python.exe.mamba_trash");
+    if trash_path.exists() {
+        let entries = windows_trash_entries(&prefix);
+        assert!(entries.iter().any(|entry| entry.ends_with("python.exe.mamba_trash")));
+    } else {
+        assert!(windows_trash_entries(&prefix).is_empty());
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_trash_survives_mutation_while_lock_held_and_cleans_after_release() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let python_exe = windows_seed_python_numpy_prefix(&prefix, tmp_home.path());
+    let mut child = windows_launch_locked_python(&python_exe);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let mut remove_python = Command::cargo_bin("viper").expect("binary exists");
+    remove_python
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let had_trash = prefix.join("python.exe.mamba_trash").exists();
+    if had_trash {
+        let before = windows_trash_entries(&prefix);
+        assert!(before.iter().any(|entry| entry.ends_with("python.exe.mamba_trash")));
+
+        let mut remove_numpy = Command::cargo_bin("viper").expect("binary exists");
+        remove_numpy
+            .env("HOME", tmp_home.path())
+            .args([
+                "--no-rc",
+                "remove",
+                "-p",
+                prefix.to_str().expect("utf8"),
+                "numpy",
+                "--json",
+            ])
+            .assert()
+            .success();
+
+        let during = windows_trash_entries(&prefix);
+        assert!(during.iter().any(|entry| entry.ends_with("python.exe.mamba_trash")));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    assert!(
+        !prefix.join("python.exe.mamba_trash").exists(),
+        "trash payload should be cleaned after lock release and next mutation"
+    );
+    assert!(
+        windows_trash_entries(&prefix).is_empty(),
+        "trash index should be empty after cleanup"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_after_unlink_rollback_restores_python_and_retains_trackable_trash() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let python_exe = windows_seed_python_numpy_prefix(&prefix, tmp_home.path());
+    let mut child = windows_launch_locked_python(&python_exe);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let mut remove_python = Command::cargo_bin("viper").expect("binary exists");
+    remove_python
+        .env("HOME", tmp_home.path())
+        .env("VIPER_TX_FAIL_POINT", "after_unlink")
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let names = installed_package_names(&prefix);
+    assert!(names.iter().any(|name| name == "python"));
+    assert!(prefix.join("python.exe").exists());
+
+    if prefix.join("python.exe.mamba_trash").exists() {
+        let entries = windows_trash_entries(&prefix);
+        assert!(entries.iter().any(|entry| entry.ends_with("python.exe.mamba_trash")));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let mut install_numpy = Command::cargo_bin("viper").expect("binary exists");
+    install_numpy
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "install",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "numpy",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    assert!(
+        !prefix.join("python.exe.mamba_trash").exists(),
+        "tracked trash should be cleaned after release and later mutation"
+    );
+    assert!(
+        windows_trash_entries(&prefix).is_empty(),
+        "trash index should be cleaned after later mutation"
+    );
+}
+
 #[test]
 fn install_remove_list_fail_when_prefix_missing() {
     let tmp = tempdir().expect("create temp dir");
