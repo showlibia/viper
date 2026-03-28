@@ -567,6 +567,12 @@ fn info_json_snapshot_is_stable() {
     body["data"]["base_environment"] = serde_json::json!("<base_environment>");
     body["data"]["base environment"] = serde_json::json!("<base_environment>");
     body["data"]["target_prefix"] = serde_json::json!("<target_prefix>");
+    body["data"]["arch"] = serde_json::json!("x86_64");
+    body["data"]["platform"] = serde_json::json!("linux-64");
+    body["data"]["channels"] = serde_json::json!([
+        "https://conda.anaconda.org/conda-forge/linux-64",
+        "https://conda.anaconda.org/conda-forge/noarch"
+    ]);
     assert_json_snapshot!("info_json_snapshot", body);
 }
 
@@ -925,6 +931,15 @@ fn list_json_snapshot_is_stable() {
         for package in packages {
             if package.get("installed_at").is_some() {
                 package["installed_at"] = serde_json::json!("<installed_at>");
+            }
+            if package["source"] == "conda" {
+                let name = package["name"].as_str().unwrap_or("pkg").to_string();
+                let version = package["version"].as_str().unwrap_or("0").to_string();
+                let build = package["build_string"].as_str().unwrap_or("0").to_string();
+                package["platform"] = serde_json::json!("linux-64");
+                package["url"] = serde_json::json!(format!(
+                    "https://conda.anaconda.org/conda-forge/linux-64/{name}-{version}-{build}.tar.bz2"
+                ));
             }
         }
     }

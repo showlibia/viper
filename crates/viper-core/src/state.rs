@@ -746,7 +746,7 @@ fn prefix_path_dirs(prefix: &Path) -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         vec![
-            prefix.clone(),
+            prefix.to_path_buf(),
             prefix.join("Scripts"),
             prefix.join("Library").join("bin"),
         ]
