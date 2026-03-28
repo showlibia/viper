@@ -70,7 +70,7 @@ struct PackageArgs {
     specs: Vec<String>,
 
     #[arg(short = 'f', long = "file")]
-    files: Vec<PathBuf>,
+    files: Vec<String>,
 }
 
 #[derive(Args, Debug)]

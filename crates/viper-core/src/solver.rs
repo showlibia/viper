@@ -32,6 +32,19 @@ pub struct SolveResult {
     pub trace: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SolveRequest {
+    pub specs: Vec<String>,
+    pub repodata: Vec<RepoPackage>,
+    pub options: SolveOptions,
+}
+
+impl SolveRequest {
+    pub fn solve(&self) -> Result<SolveResult, Vec<String>> {
+        solve_with_production_solver(&self.specs, &self.repodata, &self.options)
+    }
+}
+
 pub fn production_solver_engine() -> &'static str {
     PRODUCTION_SOLVER_ENGINE
 }

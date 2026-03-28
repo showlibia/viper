@@ -8,12 +8,12 @@ use crate::config::{ConfigInput, ConfigStore, build_config, name_to_target_prefi
 use crate::error::CoreError;
 use crate::repodata::{RepoPackage, RepodataSource, fetch_packages};
 use crate::solver::{
-    SolveOptions, SolveResult, production_solver_engine, solve_with_production_solver,
+    SolveOptions, SolveRequest, SolveResult, production_solver_engine,
     spec_requires_full_repodata,
 };
 use crate::spec::{
     SpecFileKind, normalize_spec, package_name_from_spec, parse_explicit_url, parse_match_spec,
-    parse_spec_file,
+    parse_spec_source,
 };
 use crate::state::{EnvironmentState, is_managed_prefix};
 use crate::transaction::{
@@ -97,17 +97,15 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                         repodata_source,
                     )?
                 };
-                let solve_options = SolveOptions {
-                    channels: normalized.channels.clone(),
-                    strict_channel_priority: config.channel_priority == "strict",
-                    installed_preferred: HashMap::new(),
-                    user_requested: requested_names(&normalized.conda_specs),
-                };
-                let solved = solve_with_production_entry(
-                    &normalized.conda_specs,
-                    &repodata,
-                    &solve_options,
-                )?;
+                let solve_request = build_solve_request(
+                    normalized.conda_specs.clone(),
+                    normalized.conda_specs.clone(),
+                    repodata,
+                    normalized.channels.clone(),
+                    config.channel_priority == "strict",
+                    HashMap::new(),
+                );
+                let solved = solve_with_production_entry(&solve_request)?;
                 (solved.actions, Some(solved.trace))
             };
             let conda_plan = TransactionPlan::from_solved(&[], &conda_link_actions);
@@ -232,17 +230,19 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     inject_installed_candidates(&mut repodata, &state.conda_packages());
                     repodata
                 };
-                let solve_options = SolveOptions {
-                    channels: normalized.channels.clone(),
-                    strict_channel_priority: config.channel_priority == "strict",
-                    installed_preferred: state
+                let solve_request = build_solve_request(
+                    solve_specs,
+                    normalized.conda_specs.clone(),
+                    repodata,
+                    normalized.channels.clone(),
+                    config.channel_priority == "strict",
+                    state
                         .conda_packages()
                         .into_iter()
                         .map(|pkg| (pkg.name, (pkg.version, pkg.build_string)))
                         .collect(),
-                    user_requested: requested_names(&normalized.conda_specs),
-                };
-                let solved = solve_with_production_entry(&solve_specs, &repodata, &solve_options)?;
+                );
+                let solved = solve_with_production_entry(&solve_request)?;
                 (solved.actions, Some(solved.trace))
             };
             let conda_plan = if normalized.explicit_mode {
@@ -384,16 +384,18 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                 let installed_conda = state.conda_packages();
                 let mut repodata = Vec::new();
                 inject_installed_candidates(&mut repodata, &installed_conda);
-                let solve_options = SolveOptions {
-                    channels: config.channels.clone(),
-                    strict_channel_priority: config.channel_priority == "strict",
-                    installed_preferred: installed_conda
+                let solve_request = build_solve_request(
+                    solve_specs.clone(),
+                    solve_specs,
+                    repodata,
+                    config.channels.clone(),
+                    config.channel_priority == "strict",
+                    installed_conda
                         .into_iter()
                         .map(|pkg| (pkg.name, (pkg.version, pkg.build_string)))
                         .collect(),
-                    user_requested: requested_names(&solve_specs),
-                };
-                let solved = solve_with_production_entry(&solve_specs, &repodata, &solve_options)?;
+                );
+                let solved = solve_with_production_entry(&solve_request)?;
                 let solved_plan = TransactionPlan::from_solved(&state.packages, &solved.actions);
                 let mut unlink = solved_plan.unlink;
                 for planned in preview_non_conda_unlinks {
@@ -491,7 +493,8 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
                     warnings,
                 )
             } else {
-                let state = EnvironmentState::load(&target_prefix)?;
+                let state =
+                    EnvironmentState::load_with_pip_discovery(&target_prefix, !list_options.no_pip)?;
                 let rendered = render_list_output(state.packages, &list_options)?;
                 (
                     json!({
@@ -613,7 +616,7 @@ pub fn execute(request: OperationRequest) -> Result<OperationResult, CoreError> 
 
 fn normalize_request_inputs(
     cli_specs: Vec<String>,
-    files: Vec<std::path::PathBuf>,
+    files: Vec<String>,
     base_channels: &[String],
     cli_channels: &[String],
     cli_name: Option<&str>,
@@ -629,8 +632,8 @@ fn normalize_request_inputs(
     let mut file_kind_group: Option<FileSpecKindGroup> = None;
     let mut parsed_files = Vec::new();
 
-    for path in files {
-        let parsed = parse_spec_file(&path)?;
+    for source in files {
+        let parsed = parse_spec_source(&source)?;
         let current_group = match parsed.kind {
             SpecFileKind::Yaml => FileSpecKindGroup::Yaml,
             SpecFileKind::Lock => FileSpecKindGroup::Lock,
@@ -640,16 +643,16 @@ fn normalize_request_inputs(
             if expected != current_group {
                 return Err(CoreError::InvalidEnvironmentFile(format!(
                     "all --file inputs must have the same format group (YAML, lockfile, or non-YAML), got mixed types at '{}'",
-                    path.display()
+                    source
                 )));
             }
         } else {
             file_kind_group = Some(current_group);
         }
-        parsed_files.push((path, parsed));
+        parsed_files.push((source, parsed));
     }
 
-    for (path, parsed) in parsed_files {
+    for (source, parsed) in parsed_files {
         if parsed.kind == SpecFileKind::Explicit {
             explicit_mode = true;
             explicit_specs = parsed.env.conda_specs;
@@ -657,7 +660,7 @@ fn normalize_request_inputs(
             pip_specs.clear();
             warnings.push(format!(
                 "explicit spec file '{}' switches request into explicit mode",
-                path.display()
+                source
             ));
             break;
         }
@@ -668,7 +671,7 @@ fn normalize_request_inputs(
             pip_specs = parsed.env.pip_specs;
             warnings.push(format!(
                 "lockfile '{}' switches request into locked explicit mode",
-                path.display()
+                source
             ));
             continue;
         }
@@ -683,7 +686,7 @@ fn normalize_request_inputs(
                 Some(existing) if existing != &name => {
                     warnings.push(format!(
                         "ignoring environment name '{name}' from '{}' because '{}' is already selected",
-                        path.display(),
+                        source,
                         existing
                     ));
                 }
@@ -1170,12 +1173,30 @@ fn select_repodata_source(specs: &[String]) -> RepodataSource {
 }
 
 fn solve_with_production_entry(
-    specs: &[String],
-    repodata: &[RepoPackage],
-    options: &SolveOptions,
+    request: &SolveRequest,
 ) -> Result<SolveResult, CoreError> {
     let _engine = production_solver_engine();
-    solve_with_production_solver(specs, repodata, options).map_err(CoreError::UnsatisfiedSpecs)
+    request.solve().map_err(CoreError::UnsatisfiedSpecs)
+}
+
+fn build_solve_request(
+    solve_specs: Vec<String>,
+    user_requested_specs: Vec<String>,
+    repodata: Vec<RepoPackage>,
+    channels: Vec<String>,
+    strict_channel_priority: bool,
+    installed_preferred: HashMap<String, (String, String)>,
+) -> SolveRequest {
+    SolveRequest {
+        specs: solve_specs,
+        repodata,
+        options: SolveOptions {
+            channels,
+            strict_channel_priority,
+            installed_preferred,
+            user_requested: requested_names(&user_requested_specs),
+        },
+    }
 }
 
 struct RenderedListOutput {
@@ -1690,10 +1711,67 @@ mod tests {
             installed_preferred: HashMap::new(),
             user_requested: HashSet::from(["python".to_string()]),
         };
-        let solved = solve_with_production_entry(&["python>=3.11".to_string()], &[pkg], &opts)
-            .expect("solve via core production entry");
+        let request = SolveRequest {
+            specs: vec!["python>=3.11".to_string()],
+            repodata: vec![pkg],
+            options: opts,
+        };
+        let solved =
+            solve_with_production_entry(&request).expect("solve via core production entry");
         assert_eq!(solved.actions.len(), 1);
         assert_eq!(solved.actions[0].name, "python");
+    }
+
+    #[test]
+    fn build_solve_request_uses_same_user_requested_logic_for_create_and_install() {
+        let channels = vec!["conda-forge".to_string()];
+        let create_request = build_solve_request(
+            vec!["python>=3.11".to_string()],
+            vec!["python>=3.11".to_string()],
+            Vec::new(),
+            channels.clone(),
+            false,
+            HashMap::new(),
+        );
+        let install_request = build_solve_request(
+            vec!["python>=3.11".to_string(), "numpy".to_string()],
+            vec!["numpy".to_string()],
+            Vec::new(),
+            channels,
+            false,
+            HashMap::new(),
+        );
+        assert_eq!(
+            create_request.options.user_requested,
+            HashSet::from(["python".to_string()])
+        );
+        assert_eq!(
+            install_request.options.user_requested,
+            HashSet::from(["numpy".to_string()])
+        );
+    }
+
+    #[test]
+    fn build_solve_request_carries_remove_solver_preferences() {
+        let mut installed_preferred = HashMap::new();
+        installed_preferred.insert(
+            "python".to_string(),
+            ("3.12.2".to_string(), "0".to_string()),
+        );
+        let request = build_solve_request(
+            vec!["python==3.12.2".to_string()],
+            vec!["python==3.12.2".to_string()],
+            Vec::new(),
+            vec!["conda-forge".to_string()],
+            true,
+            installed_preferred.clone(),
+        );
+        assert!(request.options.strict_channel_priority);
+        assert_eq!(request.options.installed_preferred, installed_preferred);
+        assert_eq!(
+            request.options.user_requested,
+            HashSet::from(["python".to_string()])
+        );
     }
 
     #[test]

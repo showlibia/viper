@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use rattler_conda_types::MatchSpec;
+use reqwest::Url;
 use serde::Deserialize;
 
 use crate::error::CoreError;
@@ -156,17 +157,12 @@ pub fn parse_explicit_url(url: &str) -> Result<ExplicitUrlInfo, CoreError> {
     })
 }
 
-pub fn parse_env_file(path: &Path) -> Result<EnvSpecFile, CoreError> {
-    let ext = path
-        .extension()
-        .and_then(|x| x.to_str())
-        .unwrap_or_default();
+fn parse_env_content(content: &str, ext: &str) -> Result<EnvSpecFile, CoreError> {
     if !matches!(ext, "yml" | "yaml") {
         return Err(CoreError::UnsupportedEnvironmentFile);
     }
 
-    let content = fs::read_to_string(path)?;
-    let parsed: EnvFile = serde_yaml::from_str(&content)?;
+    let parsed: EnvFile = serde_yaml::from_str(content)?;
 
     let mut conda_specs = Vec::new();
     let mut pip_specs = Vec::new();
@@ -236,26 +232,65 @@ pub fn parse_env_file(path: &Path) -> Result<EnvSpecFile, CoreError> {
     })
 }
 
-pub fn parse_spec_file(path: &Path) -> Result<ParsedSpecFile, CoreError> {
+pub fn parse_env_file(path: &Path) -> Result<EnvSpecFile, CoreError> {
     let ext = path
         .extension()
         .and_then(|x| x.to_str())
         .unwrap_or_default();
-    if matches!(ext, "yml" | "yaml") {
-        if let Some(lock_env) = parse_yaml_lockfile(path)? {
+    let content = fs::read_to_string(path)?;
+    parse_env_content(&content, ext)
+}
+
+fn source_extension(source: &str) -> String {
+    if let Ok(url) = Url::parse(source) {
+        return Path::new(url.path())
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_string();
+    }
+    Path::new(source)
+        .extension()
+        .and_then(|x| x.to_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn read_spec_source(source: &str) -> Result<String, CoreError> {
+    if let Some(path) = source.strip_prefix("file://") {
+        return fs::read_to_string(path).map_err(CoreError::from);
+    }
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let response = reqwest::blocking::get(source).map_err(|e| CoreError::Network(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(CoreError::Network(format!(
+                "failed to fetch spec file '{source}': HTTP {}",
+                response.status()
+            )));
+        }
+        return response.text().map_err(|e| CoreError::Network(e.to_string()));
+    }
+    fs::read_to_string(source).map_err(CoreError::from)
+}
+
+pub fn parse_spec_source(source: &str) -> Result<ParsedSpecFile, CoreError> {
+    let ext = source_extension(source);
+    let content = read_spec_source(source)?;
+    if matches!(ext.as_str(), "yml" | "yaml") {
+        if let Some(lock_env) = parse_yaml_lockfile_content(&content)? {
             return Ok(ParsedSpecFile {
                 kind: SpecFileKind::Lock,
                 env: lock_env,
             });
         }
-        let env = parse_env_file(path)?;
+        let env = parse_env_content(&content, &ext)?;
         return Ok(ParsedSpecFile {
             kind: SpecFileKind::Yaml,
             env,
         });
     }
     if ext.eq_ignore_ascii_case("json")
-        && let Some(lock_env) = parse_mambajs_lockfile(path)?
+        && let Some(lock_env) = parse_mambajs_lockfile_content(&content)?
     {
         return Ok(ParsedSpecFile {
             kind: SpecFileKind::Lock,
@@ -263,7 +298,6 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpecFile, CoreError> {
         });
     }
 
-    let content = fs::read_to_string(path)?;
     let lines = content.lines().map(str::trim).collect::<Vec<_>>();
     let first_content = lines
         .iter()
@@ -322,14 +356,17 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpecFile, CoreError> {
     })
 }
 
+pub fn parse_spec_file(path: &Path) -> Result<ParsedSpecFile, CoreError> {
+    parse_spec_source(path.to_string_lossy().as_ref())
+}
+
 fn validate_explicit_url(url: &str) -> Result<(), CoreError> {
     let _ = parse_explicit_url(url)?;
     Ok(())
 }
 
-fn parse_yaml_lockfile(path: &Path) -> Result<Option<EnvSpecFile>, CoreError> {
-    let content = fs::read_to_string(path)?;
-    let root = match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+fn parse_yaml_lockfile_content(content: &str) -> Result<Option<EnvSpecFile>, CoreError> {
+    let root = match serde_yaml::from_str::<serde_yaml::Value>(content) {
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
@@ -421,9 +458,8 @@ fn parse_yaml_lockfile(path: &Path) -> Result<Option<EnvSpecFile>, CoreError> {
     }))
 }
 
-fn parse_mambajs_lockfile(path: &Path) -> Result<Option<EnvSpecFile>, CoreError> {
-    let content = fs::read_to_string(path)?;
-    let root = match serde_json::from_str::<serde_json::Value>(&content) {
+fn parse_mambajs_lockfile_content(content: &str) -> Result<Option<EnvSpecFile>, CoreError> {
+    let root = match serde_json::from_str::<serde_json::Value>(content) {
         Ok(value) => value,
         Err(_) => return Ok(None),
     };

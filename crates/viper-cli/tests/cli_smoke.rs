@@ -1,5 +1,8 @@
 use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
+use std::thread;
 
 use assert_cmd::Command;
 use insta::assert_json_snapshot;
@@ -4339,6 +4342,145 @@ fn print_config_only_outputs_normalized_request_without_writing_prefix() {
 }
 
 #[test]
+fn create_print_config_only_accepts_remote_yaml_file() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let (url, server) = serve_single_http_file(
+        "env.yaml",
+        "name: remote-env\ndependencies:\n  - python\nchannels:\n  - conda-forge\n",
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            &url,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    server.join().expect("server thread");
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], true);
+    assert_eq!(body["message"], "config rendered");
+    assert_eq!(body["data"]["operation"], "create");
+    assert_eq!(body["data"]["target_prefix"], prefix.display().to_string());
+}
+
+#[test]
+fn create_print_config_only_accepts_remote_classic_spec_file() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let (url, server) = serve_single_http_file("specs.txt", "python>=3.12\nnumpy\n");
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            &url,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    server.join().expect("server thread");
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], true);
+    assert_eq!(body["message"], "config rendered");
+    assert_eq!(body["data"]["operation"], "create");
+    assert_eq!(body["data"]["target_prefix"], prefix.display().to_string());
+}
+
+#[test]
+fn create_print_config_only_accepts_remote_explicit_file() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let subdir = current_platform_subdir();
+    let explicit = format!(
+        "@EXPLICIT\nhttps://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2\n"
+    );
+    let (url, server) = serve_single_http_file("explicit.txt", &explicit);
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            &url,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    server.join().expect("server thread");
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["explicit_mode"], true);
+}
+
+#[test]
+fn create_print_config_only_accepts_remote_lockfile() {
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let subdir = current_platform_subdir();
+    let lock = format!(
+        "package:\n  - manager: conda\n    url: https://conda.anaconda.org/conda-forge/{subdir}/python-3.12.0-0.tar.bz2\n"
+    );
+    let (url, server) = serve_single_http_file("conda-lock.yml", &lock);
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    let output = create
+        .env("HOME", tmp_home.path())
+        .args([
+            "--no-rc",
+            "--print-config-only",
+            "create",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "-f",
+            &url,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    server.join().expect("server thread");
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["explicit_mode"], true);
+}
+
+#[test]
 fn create_accepts_conda_lockfile_input() {
     let tmp = tempdir().expect("create temp dir");
     let tmp_home = tempdir().expect("create temp home");
@@ -4812,6 +4954,56 @@ fn create_failure_rolls_back_existing_prefix_layout() {
     assert!(!prefix.join("conda-meta").exists());
     assert!(!prefix.join("bin").exists());
     assert!(!prefix.join("pkgs").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn create_failure_rolls_back_symlinked_prefix_layout() {
+    use std::os::unix::fs as unix_fs;
+
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("existing-prefix");
+    fs::create_dir_all(&prefix).expect("create existing prefix");
+    let target_file = prefix.join("keep-target.txt");
+    fs::write(&target_file, "keep-target").expect("write keep target");
+    unix_fs::symlink("keep-target.txt", prefix.join("keep-link.txt")).expect("create file symlink");
+    fs::create_dir_all(prefix.join("real-dir")).expect("create dir");
+    unix_fs::symlink("real-dir", prefix.join("dir-link")).expect("create dir symlink");
+    seed_repodata_cache(
+        tmp_home.path(),
+        &["https://conda.anaconda.org/conda-forge"],
+        &[("python", "3.12.0", "0")],
+    );
+
+    let mut create = Command::cargo_bin("viper").expect("binary exists");
+    create
+        .env("HOME", tmp_home.path())
+        .env("VIPER_TX_FAIL_POINT", "before_persist")
+        .args([
+            "--no-rc",
+            "create",
+            "--offline",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let file_link_meta = fs::symlink_metadata(prefix.join("keep-link.txt")).expect("file link meta");
+    assert!(file_link_meta.file_type().is_symlink());
+    assert_eq!(
+        fs::read_link(prefix.join("keep-link.txt")).expect("read file link"),
+        std::path::PathBuf::from("keep-target.txt")
+    );
+    let dir_link_meta = fs::symlink_metadata(prefix.join("dir-link")).expect("dir link meta");
+    assert!(dir_link_meta.file_type().is_symlink());
+    assert_eq!(
+        fs::read_link(prefix.join("dir-link")).expect("read dir link"),
+        std::path::PathBuf::from("real-dir")
+    );
 }
 
 #[test]
@@ -5771,6 +5963,98 @@ fn create_fails_without_repodata_and_does_not_write_state() {
     assert!(!prefix.join("conda-meta").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn list_discovers_pip_site_packages_and_no_pip_hides_them() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("create temp dir");
+    let prefix = tmp.path().join("env");
+    let meta_dir = prefix.join("conda-meta");
+    fs::create_dir_all(&meta_dir).expect("create conda-meta");
+    fs::write(
+        meta_dir.join("python-3.12.0-0.json"),
+        r#"{
+  "name":"python",
+  "version":"3.12.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"python-3.12.0-0",
+  "spec":"python",
+  "source":"conda",
+  "depends":[],
+  "installed_at":"now",
+  "platform":"linux-64"
+}"#,
+    )
+    .expect("write python record");
+    fs::write(meta_dir.join("history"), "").expect("write history");
+
+    let bin_dir = prefix.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin");
+    let python = bin_dir.join("python");
+    fs::write(
+        &python,
+        "#!/bin/sh\nprintf '{\"installed\":[{\"metadata\":{\"name\":\"rich\",\"version\":\"13.7.1\"}}]}'\n",
+    )
+    .expect("write fake python");
+    let mut perms = fs::metadata(&python).expect("python meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&python, perms).expect("chmod python");
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let names = body["data"]["packages"]
+        .as_array()
+        .expect("packages array")
+        .iter()
+        .filter_map(|pkg| pkg["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"python"));
+    assert!(names.contains(&"rich"));
+
+    let mut list_no_pip = Command::cargo_bin("viper").expect("binary exists");
+    let output = list_no_pip
+        .args([
+            "--no-rc",
+            "list",
+            "--no-pip",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let names = body["data"]["packages"]
+        .as_array()
+        .expect("packages array")
+        .iter()
+        .filter_map(|pkg| pkg["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"python"));
+    assert!(!names.contains(&"rich"));
+}
+
 #[test]
 fn install_remove_list_fail_when_prefix_missing() {
     let tmp = tempdir().expect("create temp dir");
@@ -6070,6 +6354,50 @@ fn seed_named_repodata_cache(
         )
         .expect("write repodata state");
     }
+}
+
+fn serve_single_http_file(name: &str, body: &str) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test http server");
+    let addr = listener.local_addr().expect("local addr");
+    let path = format!("/{name}");
+    let served_path = path.clone();
+    let body = body.to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept connection");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).expect("read request line");
+        let mut line = String::new();
+        loop {
+            line.clear();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+        }
+        let requested_path = request_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        let (status, payload) = if requested_path == served_path {
+            ("200 OK", body)
+        } else {
+            ("404 Not Found", "not found".to_string())
+        };
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
+        stream.flush().expect("flush response");
+        let mut drain = Vec::new();
+        let _ = stream.read_to_end(&mut drain);
+    });
+    (format!("http://127.0.0.1:{}{}", addr.port(), path), handle)
 }
 
 fn write_viperrc(home: &Path, content: &str) {

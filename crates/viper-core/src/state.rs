@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrono::Utc;
+use serde::Deserialize;
 
 use crate::error::CoreError;
 use crate::spec::{package_name_from_spec, parse_explicit_url};
@@ -57,6 +59,17 @@ impl EnvironmentState {
 
         packages.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Self { packages })
+    }
+
+    pub fn load_with_pip_discovery(
+        prefix: &Path,
+        include_pip_site_packages: bool,
+    ) -> Result<Self, CoreError> {
+        let mut state = Self::load(prefix)?;
+        if include_pip_site_packages {
+            state.merge_pip_site_packages(prefix);
+        }
+        Ok(state)
     }
 
     pub fn persist(&self, prefix: &Path) -> Result<(), CoreError> {
@@ -538,6 +551,92 @@ impl EnvironmentState {
 
         Ok(revisions)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct PipInspectReport {
+    #[serde(default)]
+    installed: Vec<PipInspectItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PipInspectItem {
+    #[serde(default)]
+    metadata: PipInspectMetadata,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PipInspectMetadata {
+    name: Option<String>,
+    version: Option<String>,
+}
+
+impl EnvironmentState {
+    fn merge_pip_site_packages(&mut self, prefix: &Path) {
+        for (name, version) in discover_pip_site_packages(prefix) {
+            if self.packages.iter().any(|pkg| pkg.name == name) {
+                continue;
+            }
+            self.packages.push(PackageRecord {
+                name: name.clone(),
+                version: version.clone(),
+                build_string: "pypi_0".to_string(),
+                channel: "pypi".to_string(),
+                base_url: "https://pypi.org".to_string(),
+                url: format!("https://pypi.org/project/{name}/"),
+                md5: None,
+                sha256: None,
+                build_number: 0,
+                dist_name: format!("{name}-{version}"),
+                spec: format!("{name}=={version}"),
+                source: "pip".to_string(),
+                depends: Vec::new(),
+                installed_at: Utc::now().to_rfc3339(),
+                platform: String::new(),
+            });
+        }
+        self.packages.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+}
+
+fn discover_pip_site_packages(prefix: &Path) -> Vec<(String, String)> {
+    let python = prefix.join("bin").join("python");
+    if !python.exists() {
+        return Vec::new();
+    }
+    let output = match Command::new(&python)
+        .args(["-m", "pip", "inspect", "--local"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let report = match serde_json::from_slice::<PipInspectReport>(&output.stdout) {
+        Ok(report) => report,
+        Err(_) => return Vec::new(),
+    };
+    report
+        .installed
+        .into_iter()
+        .filter_map(|item| {
+            let name = item.metadata.name?.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let version = item
+                .metadata
+                .version
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .unwrap_or("unknown")
+                .to_string();
+            Some((name, version))
+        })
+        .collect()
 }
 
 fn requested_name_from_history_spec(spec: &str) -> Option<String> {

@@ -338,6 +338,7 @@ enum PrefixSnapshot {
 enum SnapshotEntry {
     Dir(PathBuf),
     File(PathBuf, Vec<u8>),
+    Symlink(PathBuf, PathBuf, bool),
 }
 
 impl PrefixSnapshot {
@@ -388,6 +389,13 @@ impl PrefixSnapshot {
                         }
                         fs::write(path, content)?;
                     }
+                    if let SnapshotEntry::Symlink(rel, target, is_dir) = entry {
+                        let path = prefix.join(rel);
+                        if let Some(parent) = path.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        create_symlink(&path, target, *is_dir)?;
+                    }
                 }
                 Ok(())
             }
@@ -408,17 +416,50 @@ fn collect_entries(
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
+        let metadata = fs::symlink_metadata(&path)?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            let rel = path
+                .strip_prefix(prefix)
+                .map_err(|e| CoreError::TransactionFailed(e.to_string()))?
+                .to_path_buf();
+            let target = fs::read_link(&path)?;
+            let is_dir = fs::metadata(&path).is_ok_and(|m| m.is_dir());
+            out.push(SnapshotEntry::Symlink(rel, target, is_dir));
+            continue;
+        }
+        if file_type.is_dir() {
             collect_entries(prefix, &path, out)?;
             continue;
         }
-        if path.is_file() {
+        if file_type.is_file() {
             let rel = path
                 .strip_prefix(prefix)
                 .map_err(|e| CoreError::TransactionFailed(e.to_string()))?
                 .to_path_buf();
             out.push(SnapshotEntry::File(rel, fs::read(&path)?));
+            continue;
         }
+        return Err(CoreError::TransactionFailed(format!(
+            "unsupported filesystem entry in snapshot: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(path: &Path, target: &Path, _is_dir: bool) -> Result<(), CoreError> {
+    std::os::unix::fs::symlink(target, path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_symlink(path: &Path, target: &Path, is_dir: bool) -> Result<(), CoreError> {
+    if is_dir {
+        std::os::windows::fs::symlink_dir(target, path)?;
+    } else {
+        std::os::windows::fs::symlink_file(target, path)?;
     }
     Ok(())
 }
