@@ -7116,7 +7116,7 @@ fn current_platform_subdir() -> String {
 
 fn mamba_lockfile_fixture(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../mamba/micromamba/tests/env_lockfiles")
+        .join("tests/fixtures/lockfiles")
         .join(name)
 }
 

@@ -1,0 +1,22 @@
+{
+  "lockVersion": "1.0.0",
+  "platform": "linux-64",
+  "channels": ["conda-forge"],
+  "packages": {
+    "libzlib-1.2.11-h36c2ea0_1013.tar.bz2": {
+      "name": "libzlib",
+      "build": "h36c2ea0_1013",
+      "version": "1.2.11",
+      "subdir": "linux-64",
+      "channel": "conda-forge"
+    },
+    "zlib-1.2.11-h36c2ea0_1013.tar.bz2": {
+      "name": "zlib",
+      "build": "h36c2ea0_1013",
+      "version": "1.2.11",
+      "subdir": "linux-64",
+      "channel": "conda-forge"
+    }
+  },
+  "pipPackages": {}
+}
