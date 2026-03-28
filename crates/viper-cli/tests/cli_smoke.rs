@@ -6788,6 +6788,10 @@ fn windows_remove_in_use_creates_and_tracks_trash_survivor() {
         windows_assert_trash_index_matches_payloads(&prefix);
     } else {
         assert!(
+            windows_actual_trash_payloads(&prefix).is_empty(),
+            "no-trash branch should not leave any .mamba_trash payloads in prefix"
+        );
+        assert!(
             windows_trash_entries(&prefix).is_none(),
             "mamba_trash.txt should not exist when no trash payload was created"
         );
@@ -6848,8 +6852,8 @@ fn windows_trash_survives_mutation_while_lock_held_and_cleans_after_release() {
         windows_assert_trash_index_matches_payloads(&prefix);
     } else {
         assert!(
-            !prefix.join("python.exe.mamba_trash").exists(),
-            "no-trash branch should not create trash payload on second mutation"
+            windows_actual_trash_payloads(&prefix).is_empty(),
+            "no-trash branch should keep prefix free of .mamba_trash payloads after second mutation"
         );
         assert!(
             windows_trash_entries(&prefix).is_none(),
@@ -6876,8 +6880,8 @@ fn windows_trash_survives_mutation_while_lock_held_and_cleans_after_release() {
         .success();
 
     assert!(
-        !prefix.join("python.exe.mamba_trash").exists(),
-        "trash payload should be cleaned after lock release and next mutation"
+        windows_actual_trash_payloads(&prefix).is_empty(),
+        "all .mamba_trash payloads should be cleaned after lock release and next mutation"
     );
     assert!(
         windows_trash_entries(&prefix).is_none(),
@@ -6919,9 +6923,7 @@ fn windows_after_unlink_rollback_restores_python_and_retains_trackable_trash() {
         "rollback should keep python history metadata available"
     );
 
-    if prefix.join("python.exe.mamba_trash").exists() {
-        windows_assert_trash_index_matches_payloads(&prefix);
-    }
+    windows_assert_trash_index_matches_payloads(&prefix);
 
     let _ = child.kill();
     let _ = child.wait();
@@ -6942,8 +6944,8 @@ fn windows_after_unlink_rollback_restores_python_and_retains_trackable_trash() {
         .success();
 
     assert!(
-        !prefix.join("python.exe.mamba_trash").exists(),
-        "tracked trash should be cleaned after release and later mutation"
+        windows_actual_trash_payloads(&prefix).is_empty(),
+        "all tracked trash payloads should be cleaned after release and later mutation"
     );
     assert!(
         windows_trash_entries(&prefix).is_none(),
