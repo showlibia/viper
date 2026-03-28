@@ -183,6 +183,7 @@ impl TransactionExecutor {
             });
         }
 
+        clean_trash_files(prefix)?;
         let snapshot = PrefixSnapshot::capture(prefix)?;
         let mut fetched = 0usize;
         let mut extracted = 0usize;
@@ -190,7 +191,6 @@ impl TransactionExecutor {
         let mut linked = 0usize;
         let mut pip_changed = 0usize;
         let tx_result = (|| -> Result<(), CoreError> {
-            clean_trash_files(prefix)?;
             if self.ensure_layout {
                 ensure_prefix_layout(prefix)?;
             }

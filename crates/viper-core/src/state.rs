@@ -731,11 +731,7 @@ fn inspect_platform(environment: &serde_json::Value) -> Option<String> {
 }
 
 fn resolve_python_from_prefix_path(prefix: &Path) -> Option<PathBuf> {
-    let mut search_dirs = prefix_path_dirs(prefix);
-    if let Some(current_path) = std::env::var_os("PATH") {
-        search_dirs.extend(std::env::split_paths(&current_path));
-    }
-    for dir in search_dirs {
+    for dir in prefix_path_dirs(prefix) {
         for candidate in python_command_names() {
             let path = dir.join(candidate);
             if path.exists() && path.is_file() {

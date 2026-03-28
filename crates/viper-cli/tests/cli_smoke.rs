@@ -6152,6 +6152,70 @@ fn list_ignores_site_packages_when_conda_pip_is_not_installed() {
 
 #[cfg(unix)]
 #[test]
+fn list_does_not_fallback_to_host_path_python_for_pip_discovery() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let meta_dir = prefix.join("conda-meta");
+    fs::create_dir_all(&meta_dir).expect("create conda-meta");
+    fs::write(
+        meta_dir.join("pip-24.0-0.json"),
+        r#"{
+  "name":"pip",
+  "version":"24.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/noarch/pip-24.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"pip-24.0-0",
+  "spec":"pip",
+  "source":"conda",
+  "depends":["python >=3.12,<3.13"],
+  "installed_at":"now",
+  "platform":"noarch"
+}"#,
+    )
+    .expect("write pip record");
+    fs::write(meta_dir.join("history"), "").expect("write history");
+
+    let host_bin = tmp.path().join("host-bin");
+    fs::create_dir_all(&host_bin).expect("create host bin");
+    let host_python = host_bin.join("python");
+    fs::write(
+        &host_python,
+        "#!/bin/sh\nprintf '{\"environment\":{\"sys_platform\":\"fakeos\",\"platform_machine\":\"fakearch\"},\"installed\":[{\"installer\":\"pip\",\"metadata\":{\"name\":\"host-leak\",\"version\":\"1.0\"}}]}'\n",
+    )
+    .expect("write host python");
+    let mut perms = fs::metadata(&host_python).expect("host python meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&host_python, perms).expect("chmod host python");
+
+    let mut list = Command::cargo_bin("viper").expect("binary exists");
+    let output = list
+        .env("HOME", tmp_home.path())
+        .env("PATH", host_bin.to_str().expect("utf8"))
+        .args([
+            "--no-rc",
+            "list",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("valid json");
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(err.contains("no python executable was found"));
+}
+
+#[cfg(unix)]
+#[test]
 fn list_ignores_non_pip_installers_from_pip_inspect() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -6475,6 +6539,77 @@ fn transaction_cleans_previous_mamba_trash_entries_before_apply() {
     assert!(
         !meta_dir.join("mamba_trash.txt").exists(),
         "trash index should be removed when empty"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn transaction_cleanup_survives_failpoint_rollback() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("create temp dir");
+    let tmp_home = tempdir().expect("create temp home");
+    let prefix = tmp.path().join("env");
+    let meta_dir = prefix.join("conda-meta");
+    let bin_dir = prefix.join("bin");
+    fs::create_dir_all(&meta_dir).expect("create conda-meta");
+    fs::create_dir_all(&bin_dir).expect("create bin");
+
+    fs::write(
+        meta_dir.join("python-3.12.0-0.json"),
+        r#"{
+  "name":"python",
+  "version":"3.12.0",
+  "build_string":"0",
+  "channel":"https://conda.anaconda.org/conda-forge",
+  "base_url":"https://conda.anaconda.org/conda-forge",
+  "url":"https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-0.tar.bz2",
+  "build_number":0,
+  "dist_name":"python-3.12.0-0",
+  "spec":"python",
+  "source":"conda",
+  "depends":[],
+  "installed_at":"now",
+  "platform":"linux-64"
+}"#,
+    )
+    .expect("write python record");
+    fs::write(
+        meta_dir.join("history"),
+        "==> 2026-03-23 00:00:00 <==\n# create specs: [\"python\"]\n+ python-3.12.0-0\n",
+    )
+    .expect("write history");
+
+    let python = bin_dir.join("python");
+    fs::write(&python, "#!/bin/sh\nexit 0\n").expect("write python executable");
+    let mut perms = fs::metadata(&python).expect("python meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&python, perms).expect("chmod python");
+
+    let stale_trash = bin_dir.join("python.mamba_trash");
+    fs::write(&stale_trash, "stale").expect("write stale trash");
+    fs::write(meta_dir.join("mamba_trash.txt"), "bin/python.mamba_trash\n")
+        .expect("write trash index");
+
+    let mut remove = Command::cargo_bin("viper").expect("binary exists");
+    remove
+        .env("HOME", tmp_home.path())
+        .env("VIPER_TX_FAIL_POINT", "after_fetch")
+        .args([
+            "--no-rc",
+            "remove",
+            "-p",
+            prefix.to_str().expect("utf8"),
+            "python",
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    assert!(!stale_trash.exists(), "trash file should stay cleaned after rollback");
+    assert!(
+        !meta_dir.join("mamba_trash.txt").exists(),
+        "trash index should stay removed after rollback"
     );
 }
 
